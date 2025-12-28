@@ -1,5 +1,4 @@
 from __future__ import annotations
-from urllib.parse import quote
 
 
 # =============================================================================
@@ -339,6 +338,14 @@ def build_transcript_popup_stylesheet(pal: dict[str, str]) -> str:
             border-radius: 6px;
             padding: 8px 12px;
             color: {pal["text"]};
+        }}
+
+        /* Popup 內的工具按鈕（Zoom In/Out）：
+           - 使用 objectName = IconButton
+           - padding 置 0，避免 fixedSize 時內容被擠壓
+        */
+        QPushButton#IconButton {{
+            padding: 0px;
         }}
         QPushButton:hover {{
             border-color: {pal["accent"]};

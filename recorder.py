@@ -18,6 +18,8 @@ def list_input_devices() -> list[InputDevice]:
 
     備註：
     - 這裡使用 sounddevice（PortAudio）列舉裝置。
+    - 只列出穩定可用的設備（MME 或 DirectSound API）。
+    - 優先使用 MME 以避免重複，若 MME 不可用則使用 DirectSound。
     - 若 sounddevice 不存在或列舉失敗，會拋出例外，讓上層決定如何降級顯示。
     """
     try:
@@ -31,18 +33,59 @@ def list_input_devices() -> list[InputDevice]:
     devices = sd.query_devices()
     default_in, _default_out = sd.default.device
 
+    # 取得 Host API 資訊
+    hostapis = sd.query_hostapis()
+    
+    # 找出 MME 和 DirectSound 的 Host API ID
+    mme_id = None
+    directsound_id = None
+    
+    for idx, api in enumerate(hostapis):
+        api_name = api.get("name", "").lower()
+        if "mme" in api_name:
+            mme_id = idx
+        elif "directsound" in api_name:
+            directsound_id = idx
+    
+    # 優先使用 MME（通常更穩定），若不存在則使用 DirectSound
+    preferred_hostapi = mme_id if mme_id is not None else directsound_id
+    
     inputs: list[InputDevice] = []
 
     # 先放一個「System Default」讓使用者好選
     default_name = "System Default"
     if isinstance(default_in, int) and 0 <= default_in < len(devices):
-        default_name = f"System Default ({devices[default_in]['name']})"
+        default_dev_name = devices[default_in].get('name', '')
+        if default_dev_name:
+            default_name = f"System Default ({default_dev_name})"
     inputs.append(InputDevice(device_id=-1, name=default_name, is_default=True))
 
+    # 用來記錄已添加的設備名稱（去重複）
+    seen_names: set[str] = set()
+
     for idx, dev in enumerate(devices):
+        # 過濾條件 1：必須有輸入通道
         if int(dev.get("max_input_channels", 0)) <= 0:
             continue
+        
+        # 過濾條件 2：只接受指定的 Host API（MME 或 DirectSound）
+        hostapi = dev.get("hostapi", -1)
+        if preferred_hostapi is not None and hostapi != preferred_hostapi:
+            continue
+        
+        # 過濾條件 3：檢查設備基本資訊是否有效
+        default_sr = dev.get("default_samplerate", 0)
+        if hostapi < 0 or default_sr <= 0:
+            continue
+        
+        # 取得設備名稱並去重複
         name = str(dev.get("name", f"Input {idx}"))
+        
+        # 去除重複的設備名稱（同一個物理設備可能有多個 ID）
+        if name in seen_names:
+            continue
+        seen_names.add(name)
+        
         is_default = (idx == default_in)
         inputs.append(InputDevice(device_id=int(idx), name=name, is_default=is_default))
 
@@ -181,3 +224,52 @@ class AudioRecorder:
             with self._lock:
                 self._chunks = []
             self._paused = True
+
+if __name__ == "__main__":
+    import sounddevice as sd
+    
+    devices = sd.query_devices()
+    default_in, _ = sd.default.device
+    
+    print("測試哪些設備可以實際開啟錄音...")
+    print("=" * 80)
+    
+    working_devices = []
+    
+    for idx, dev in enumerate(devices):
+        max_in = int(dev.get("max_input_channels", 0))
+        if max_in <= 0:
+            continue
+            
+        name = dev.get('name', 'N/A')
+        hostapi = dev.get('hostapi', -1)
+        
+        try:
+            hostapi_info = sd.query_hostapis(hostapi)
+            hostapi_name = hostapi_info.get('name', 'Unknown')
+        except:
+            hostapi_name = 'Unknown'
+        
+        # 測試是否可以開啟
+        try:
+            test_stream = sd.InputStream(
+                device=idx,
+                channels=1,
+                samplerate=16000,
+                blocksize=1024,
+            )
+            test_stream.close()
+            status = "✓ 可用"
+            working_devices.append((idx, name, hostapi_name))
+        except Exception as e:
+            status = f"✗ 失敗: {str(e)[:50]}"
+        
+        is_default = " [預設]" if idx == default_in else ""
+        print(f"{idx:3d} | {hostapi_name:20s} | {status:30s} | {name[:40]}{is_default}")
+    
+    print("\n" + "=" * 80)
+    print(f"總共測試: {sum(1 for d in devices if d.get('max_input_channels', 0) > 0)} 個設備")
+    print(f"可用設備: {len(working_devices)} 個")
+    print("\n建議只顯示這些可用的設備:")
+    for idx, name, api in working_devices:
+        print(f"  {idx}: [{api}] {name}")
