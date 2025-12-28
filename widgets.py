@@ -65,10 +65,10 @@ class WaveformBusyIndicator(QWidget):
     def __init__(
         self,
         accent: str,
-        bar_width: int = 4,
-        bar_gap: int = 3,
+        bar_width: int = 5,
+        bar_gap: int = 5,
         min_height_ratio: float = 0.20,
-        max_height_ratio: float = 0.95,
+        max_height_ratio: float = 1,
         fps: int = 30,
         speed: float = 0.22,
         parent: QWidget | None = None,
@@ -185,7 +185,7 @@ class MiniRecordIndicator(QWidget):
         bar_width: int = 3,
         bar_gap: int = 3,
         min_height_ratio: float = 0.25,
-        max_height_ratio: float = 0.90,
+        max_height_ratio: float = 1,
         idle_dot_radius: float = 2.2,
         fps: int = 30,
         speed: float = 0.25,
@@ -532,18 +532,19 @@ class RecordArea(PanelBase):
         self._sync_ui()
 
     def set_controls_enabled(self, enabled: bool) -> None:
-        """讓 MainWindow 在 BusyArea 時禁用/啟用按鍵。
+        """讓 MainWindow 在 BusyArea 時禁用/啟用按鈕。
 
         注意：重新啟用時，需要依照目前狀態重新套用 enable/checked。
         """
         enabled = bool(enabled)
         if not enabled:
-            self.btn_record.setEnabled(False)
+            self.btn_record.setEnabled(True)
             self.btn_pause.setEnabled(False)
             self.btn_undo.setEnabled(False)
             self.btn_transcribe.setEnabled(False)
             return
 
+        # 重新啟用時：依照完整的狀態邏輯重新同步所有按鈕
         self._sync_ui()
 
     def shutdown(self) -> None:
