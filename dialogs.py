@@ -19,7 +19,7 @@ from app_config import DEFAULT_CONFIG
 from style import (
     build_settings_dialog_stylesheet,
     build_transcript_popup_stylesheet,
-    get_dialog_palette,
+    get_palette,
 )
 
 
@@ -36,7 +36,7 @@ class TranscriptPopupDialog(QDialog):
         self.setMinimumSize(500, 400)
 
         # 由 style.py 統一管理顏色與 QSS，避免 dialogs.py 出現大量風格代碼
-        pal = get_dialog_palette(theme)
+        pal = get_palette(theme)
         self.setStyleSheet(build_transcript_popup_stylesheet(pal))
 
         layout = QVBoxLayout(self)
@@ -94,7 +94,7 @@ class SettingsDialog(QWidget):
         self.setWindowModality(Qt.ApplicationModal)
 
         theme = self.config.get("theme", "dark")
-        pal = get_dialog_palette(theme)
+        pal = get_palette(theme)
         self.setStyleSheet(build_settings_dialog_stylesheet(pal))
 
         self._build_ui()
