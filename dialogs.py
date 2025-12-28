@@ -164,6 +164,48 @@ class SettingsDialog(QWidget):
         lang_row.addWidget(self.lang_input)
         layout.addLayout(lang_row)
 
+        # 麥克風（輸入裝置）
+        mic_row = QHBoxLayout()
+        mic_row.setSpacing(12)
+        mic_label = QLabel("Input Microphone")
+        mic_label.setFixedWidth(140)
+
+        self.mic_combo = QComboBox()
+
+        self.mic_combo.setMinimumContentsLength(30)  # 顯示大約 n 個字寬
+        self.mic_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+
+        # 延遲 import：避免在沒有 sounddevice 的環境讓 Settings 無法開啟
+        try:
+            from recorder import list_input_devices
+            devices = list_input_devices()
+        except Exception:
+            devices = []
+
+        if not devices:
+            # 退化：至少提供 System Default，讓功能不至於整個消失
+            self.mic_combo.addItem("System Default", -1)
+        else:
+            for dev in devices:
+                label = dev.name
+                if dev.is_default and dev.device_id != -1:
+                    label = f"{label} (default)"
+                self.mic_combo.addItem(label, dev.device_id)
+
+        current_device = int(self.config.get("input_device", -1))
+        idx = self.mic_combo.findData(current_device)
+        if idx >= 0:
+            self.mic_combo.setCurrentIndex(idx)
+        else:
+            # 若配置值已不存在，退回 System Default
+            idx2 = self.mic_combo.findData(-1)
+            if idx2 >= 0:
+                self.mic_combo.setCurrentIndex(idx2)
+
+        mic_row.addWidget(mic_label)
+        mic_row.addWidget(self.mic_combo)
+        layout.addLayout(mic_row)
+
         # VRAM Release 時間設定
         ttl_row = QHBoxLayout()
         ttl_row.setSpacing(12)
@@ -172,7 +214,7 @@ class SettingsDialog(QWidget):
         ttl_value = self.config["model_ttl_seconds"]
         ttl_str = "Never" if ttl_value < 0 else str(ttl_value)
         self.ttl_combo = self._create_combo(
-            ["30", "60", "120", "300", "600", "Never"],
+            ["60", "120", "180", "300", "600", "Never"],
             ttl_str,
         )
         ttl_row.addWidget(ttl_label)
@@ -212,11 +254,11 @@ class SettingsDialog(QWidget):
         self.ck_txt.setChecked(bool(self.config.get("output_txt", True)))
         self.ck_srt.setChecked(bool(self.config.get("output_srt", True)))
 
+        out_row.addStretch(1)
         out_row.addWidget(self.ck_popup)
         out_row.addWidget(self.ck_clipboard)
         out_row.addWidget(self.ck_txt)
         out_row.addWidget(self.ck_srt)
-        out_row.addStretch(1)
         layout.addLayout(out_row)
 
         # 分隔線
@@ -295,6 +337,13 @@ class SettingsDialog(QWidget):
             if hasattr(self, "lang_input"):
                 self.lang_input.setText("")
         self.config["language_hint"] = resolved_lang
+
+        # 麥克風輸入裝置（-1 = System Default）
+        if hasattr(self, "mic_combo"):
+            try:
+                self.config["input_device"] = int(self.mic_combo.currentData())
+            except Exception:
+                self.config["input_device"] = -1
 
         ttl_text = self.ttl_combo.currentText()
         self.config["model_ttl_seconds"] = -1 if ttl_text == "Never" else int(ttl_text)

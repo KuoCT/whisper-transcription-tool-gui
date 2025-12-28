@@ -2,27 +2,28 @@ import os
 import subprocess
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QDialog,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QStackedLayout,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
-    QDialog,
-    QCheckBox,
-    QTextEdit,
+    QMessageBox
 )
 from app_config import load_config, save_config
 from dialogs import SettingsDialog, TranscriptPopupDialog
 from model_manager import ModelManager
 from output_utils import write_srt, write_txt
 from style import build_error_dialog_stylesheet, build_stylesheet, get_palette
-from widgets import BusyArea, DropArea, WaveformBusyIndicator
+from widgets import BusyArea, DropArea, RecordArea, WaveformBusyIndicator
 from worker import TranscribeWorker
 
 
@@ -47,6 +48,10 @@ class MainWindow(QWidget):
 
         self._pal = get_palette(self.config.get("theme", "dark"))
 
+        # 初始模式：File（拖放）
+        # - 當按下「Record」模式鍵時切到 RecordArea，按鍵文字會變成「File」
+        self._mode = "file"  # "file" / "record"
+
         # 確保輸出目錄存在（只在需要輸出檔案時建立）
         self.output_dir = Path(self.config.get("output_dir", str(base_dir / "output")))
         if self.config.get("output_txt", True) or self.config.get("output_srt", True):
@@ -54,8 +59,8 @@ class MainWindow(QWidget):
 
         # 初始化模型管理器
         self.model_manager = ModelManager(
-            self.config.get("model_name", "large"),
-            self.config.get("model_ttl_seconds", 60),
+            self.config.get("model_name", "turbo"),
+            self.config.get("model_ttl_seconds", 180),
         )
 
         self._queue: list[Path] = []
@@ -66,13 +71,13 @@ class MainWindow(QWidget):
         # 避免 pop-up 被 GC 回收
         self._popup_refs: list[TranscriptPopupDialog] = []
 
-        # 狀態標籤
+        # 狀態標籤（BusyArea 會把它疊在波形動畫上方）
         self.status_label = QLabel("Ready")
         self.status_label.setWordWrap(True)
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setObjectName("StatusLabel")
 
-        # 波形指示器
+        # 忙碌指示器（檔案處理/轉譯中）
         self.wave_indicator = WaveformBusyIndicator(
             accent=self._pal["accent"],
             bar_width=5,
@@ -81,14 +86,25 @@ class MainWindow(QWidget):
             speed=0.23,
         )
 
-        # 拖放區域和忙碌區域
+        # 三個主要區域：DropArea / RecordArea / BusyArea
         self.drop_area = DropArea(self.handle_files, self._pal)
+
+        self.record_area = RecordArea(
+            self._pal,
+            get_input_device=self._get_input_device,
+            on_transcribe=self._transcribe_recorded_audio,
+            on_error=self._show_error,
+            asset_dir=(base_dir / "asset"),
+        )
+
         self.busy_area = BusyArea(self._pal, self.wave_indicator, self.status_label)
 
-        # 堆疊佈局切換兩個視圖
+        # 堆疊佈局切換三個視圖
+        # index 0 = DropArea, 1 = RecordArea, 2 = BusyArea
         self._stack = QStackedLayout()
         self._stack.setContentsMargins(0, 0, 0, 0)
         self._stack.addWidget(self.drop_area)
+        self._stack.addWidget(self.record_area)
         self._stack.addWidget(self.busy_area)
 
         stack_container = QWidget()
@@ -98,19 +114,17 @@ class MainWindow(QWidget):
         button_layout = QHBoxLayout()
         button_layout.setSpacing(8)
 
-        # 設定按鈕
-        self.settings_btn = QPushButton("Settings")
-        self.settings_btn.clicked.connect(self._open_settings)
-
-        # 錄音按鈕（預留）
+        # 模式鍵：Record <-> File（當前在 file 模式時顯示 "Record"）
         self.record_btn = QPushButton("Record")
-        self.record_btn.clicked.connect(self._start_recording)
-        self.record_btn.setEnabled(False)  # 暫時禁用
-        self.record_btn.setToolTip("Coming soon")
+        self.record_btn.clicked.connect(self._toggle_mode)
 
         # 打開輸出資料夾按鈕
         self.open_folder_btn = QPushButton("Output Folder")
         self.open_folder_btn.clicked.connect(self._open_output_folder)
+
+        # 設定按鈕
+        self.settings_btn = QPushButton("Settings")
+        self.settings_btn.clicked.connect(self._open_settings)
 
         button_layout.addWidget(self.record_btn)
         button_layout.addWidget(self.open_folder_btn)
@@ -131,61 +145,110 @@ class MainWindow(QWidget):
         self._idle_timer.start()
 
         self._apply_theme()
+        self._show_idle_view()
+
+    # -------------------------------------------------------------------------
+    # Theme / Mode
+    # -------------------------------------------------------------------------
 
     def _apply_theme(self):
         """應用主題樣式"""
         self.setStyleSheet(build_stylesheet(self._pal))
 
-    def _show_idle_view(self):
-        """顯示閒置視圖（拖放區域）"""
-        self._stack.setCurrentIndex(0)
+    def _toggle_mode(self) -> None:
+        """切換模式：File（DropArea）<-> Record（RecordArea）"""
+        if self._busy:
+            return
 
-    def _show_busy_view(self):
-        """顯示忙碌視圖（波形動畫）"""
-        self._stack.setCurrentIndex(1)
+        if self._mode == "file":
+            self._mode = "record"
+            self.record_btn.setText("File")
+            self._show_idle_view()
+        else:
+            # 切回檔案模式時，保守停止並清掉錄音（避免背景 stream 留著）
+            self.record_area.reset_recording()
+
+            self._mode = "file"
+            self.record_btn.setText("Record")
+            self._show_idle_view()
+
+    def _show_idle_view(self) -> None:
+        """顯示閒置視圖：依模式顯示 DropArea 或 RecordArea。"""
+        if self._busy:
+            self._stack.setCurrentIndex(2)
+            return
+
+        if self._mode == "record":
+            self._stack.setCurrentIndex(1)
+        else:
+            self._stack.setCurrentIndex(0)
+
+    def _show_busy_view(self) -> None:
+        """顯示忙碌視圖（BusyArea）"""
+        self._stack.setCurrentIndex(2)
+
+    def _set_busy_controls(self, busy: bool) -> None:
+        """Busy 時禁用部分控制項，避免狀態競態。"""
+        busy = bool(busy)
+        self.record_btn.setEnabled(not busy)
+        self.settings_btn.setEnabled(not busy)
+        self.record_area.set_controls_enabled(not busy)
+
+    # -------------------------------------------------------------------------
+    # Settings / Output folder
+    # -------------------------------------------------------------------------
 
     def _open_settings(self):
-        """打開設定對話框"""
-        dialog = SettingsDialog(self.config, self)
-        dialog.settings_changed.connect(self._apply_settings)
-        dialog.show()
+        """打開設定視窗"""
+        dlg = SettingsDialog(self.config, parent=self)
+        dlg.settings_changed.connect(self._apply_settings)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _apply_settings(self, new_config: dict):
-        """應用新設定並重繪 GUI"""
-        old_theme = self.config.get("theme", "dark")
+        """套用新設定"""
         self.config = new_config
-        save_config(new_config)
+        save_config(self.config)
 
-        # 更新輸出目錄
-        self.output_dir = Path(self.config.get("output_dir", "output"))
+        self._pal = get_palette(self.config.get("theme", "dark"))
+        self._apply_theme()
+
+        # 重新建立輸出目錄（只在需要輸出檔案時建立）
+        base_dir = Path(__file__).resolve().parent
+        self.output_dir = Path(self.config.get("output_dir", str(base_dir / "output")))
         if self.config.get("output_txt", True) or self.config.get("output_srt", True):
             self.output_dir.mkdir(exist_ok=True, parents=True)
 
-        # 更新模型管理器配置
+        # 更新模型管理器設定
         self.model_manager.update_config(
-            self.config.get("model_name", "large"),
-            self.config.get("model_ttl_seconds", 60),
+            self.config.get("model_name", "turbo"),
+            self.config.get("model_ttl_seconds", 180),
         )
 
-        # 如果主題改變，重新創建整個 GUI
-        if old_theme != self.config.get("theme", "dark"):
-            self._rebuild_gui()
-
-    def _rebuild_gui(self):
-        """重新構建整個 GUI（用於主題切換）"""
-        was_busy = self._busy
-        current_queue = self._queue.copy()
-        current_status = self.status_label.text()
-
-        self._pal = get_palette(self.config.get("theme", "dark"))
-
-        self._apply_theme()
+        # 更新 Busy 指示器顏色
         self.wave_indicator.set_color(self._pal["accent"])
 
+        # 重新建立三個區域（確保 palette/邊框一致）
+        self._rebuild_gui()
+
+    def _rebuild_gui(self) -> None:
+        """重建面板（Drop/Record/Busy）以刷新 palette。"""
+        base_dir = Path(__file__).resolve().parent
+
         old_drop = self.drop_area
+        old_record = self.record_area
         old_busy = self.busy_area
+        current_status = self.status_label.text()
 
         self.drop_area = DropArea(self.handle_files, self._pal)
+        self.record_area = RecordArea(
+            self._pal,
+            get_input_device=self._get_input_device,
+            on_transcribe=self._transcribe_recorded_audio,
+            on_error=self._show_error,
+            asset_dir=(base_dir / "asset"),
+        )
         self.busy_area = BusyArea(self._pal, self.wave_indicator, self.status_label)
 
         self.status_label.setText(current_status)
@@ -193,72 +256,78 @@ class MainWindow(QWidget):
         self.status_label.raise_()
 
         self._stack.removeWidget(old_drop)
+        self._stack.removeWidget(old_record)
         self._stack.removeWidget(old_busy)
+
+        # 依 index 插回去，保持 index 固定：0 drop, 1 record, 2 busy
         self._stack.insertWidget(0, self.drop_area)
-        self._stack.insertWidget(1, self.busy_area)
+        self._stack.insertWidget(1, self.record_area)
+        self._stack.insertWidget(2, self.busy_area)
 
         old_drop.deleteLater()
+        old_record.deleteLater()
         old_busy.deleteLater()
 
-        if was_busy:
-            self._show_busy_view()
-        else:
-            self._show_idle_view()
-
-        self._queue = current_queue
-
-    def _start_recording(self):
-        """開始錄音（預留功能）"""
-        QMessageBox.information(self, "Coming Soon", "Recording feature is under development.")
+        self._show_idle_view()
 
     def _open_output_folder(self):
         """打開輸出資料夾"""
-        output_path = str(self.output_dir.resolve())
+        folder = str(self.output_dir)
+        try:
+            if os.name == "nt":
+                os.startfile(folder)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", folder], check=False)
+            else:
+                subprocess.run(["xdg-open", folder], check=False)
+        except Exception:
+            # 這裡不阻塞主要流程：不一定每個環境都能 open folder
+            pass
 
-        if sys.platform == "win32":
-            os.startfile(output_path)
-        elif sys.platform == "darwin":
-            subprocess.run(["open", output_path])
-        else:
-            subprocess.run(["xdg-open", output_path])
+    def _get_input_device(self) -> int:
+        """取得目前設定的麥克風裝置（-1 代表 system default）。"""
+        try:
+            return int(self.config.get("input_device", -1))
+        except Exception:
+            return -1
+
+    # -------------------------------------------------------------------------
+    # File drop pipeline
+    # -------------------------------------------------------------------------
 
     def handle_files(self, files: list[str]):
-        """處理拖放的檔案（只在閒置狀態接受）"""
-        added = 0
-        invalid_files = []
+        """處理拖放的檔案"""
+        if self._busy:
+            QMessageBox.information(self, "Busy", "Currently processing. Please wait.")
+            return
 
-        for raw in files:
-            path = Path(raw)
-            if not path.exists():
-                invalid_files.append(path.name)
-                continue
-            self._queue.append(path)
-            added += 1
+        paths = [Path(p) for p in files if p]
+        # 只保留存在的檔案
+        paths = [p for p in paths if p.exists()]
 
-        if invalid_files:
-            self._show_error("File not found:\n" + "\n".join(invalid_files))
+        if not paths:
+            return
 
-        if added > 0:
-            self._start_next_if_idle()
+        self._queue.extend(paths)
+        self._start_next_if_idle()
 
     def _start_next_if_idle(self):
-        """如果閒置則開始處理下一個檔案"""
-        if self._busy:
-            return
-        if not self._queue:
-            self._show_idle_view()
-            self.status_label.setText("Ready")
+        """如果閒置就開始處理下一個檔案"""
+        if self._busy or not self._queue:
             return
 
         input_path = self._queue.pop(0)
         self._busy = True
+        self._set_busy_controls(True)
         self._show_busy_view()
-        self.status_label.setText(f"Processing: {input_path.name}")
+        self.status_label.setText(f"Queued: {input_path.name}\nStarting...")
 
         worker = TranscribeWorker(
             input_path=input_path,
             model_manager=self.model_manager,
             language_hint=self.config.get("language_hint", ""),
+            display_name=input_path.name,
+            output_stem=input_path.stem,
         )
         worker.progress.connect(self._on_worker_progress)
         worker.finished.connect(self._on_worker_finished)
@@ -269,14 +338,59 @@ class MainWindow(QWidget):
         self._current_thread = thread
         thread.start()
 
+    # -------------------------------------------------------------------------
+    # Recording pipeline (in-memory)
+    # -------------------------------------------------------------------------
+
+    def _transcribe_recorded_audio(self, audio) -> None:
+        """由 RecordArea 呼叫：把錄音波形送進 whisper（不落地）。"""
+        if self._busy:
+            return
+
+        # 為每次錄音產生唯一輸出檔名，避免覆蓋
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        stem = f"recording_{ts}"
+
+        self._busy = True
+        self._set_busy_controls(True)
+        self._show_busy_view()
+        self.status_label.setText("Transcribing recording...")
+
+        worker = TranscribeWorker(
+            audio=audio,
+            model_manager=self.model_manager,
+            language_hint=self.config.get("language_hint", ""),
+            display_name="Recording",
+            output_stem=stem,
+        )
+        worker.progress.connect(self._on_worker_progress)
+        worker.finished.connect(self._on_worker_finished)
+        worker.error.connect(self._on_worker_error)
+
+        thread = threading.Thread(target=worker.run, daemon=True)
+        self._current_worker = worker
+        self._current_thread = thread
+        thread.start()
+
+    # -------------------------------------------------------------------------
+    # Worker callbacks
+    # -------------------------------------------------------------------------
+
     def _on_worker_progress(self, message: str):
         """工作器進度更新"""
         self.status_label.setText(message)
 
     def _on_worker_finished(self, payload: dict):
         """工作器完成（由主執行緒處理輸出：pop-up / clipboard / txt / srt）"""
-        input_path = Path(payload.get("input_path", ""))
-        stem = input_path.stem if input_path.name else "output"
+        display_name = payload.get("display_name") or ""
+        output_stem = payload.get("output_stem") or ""
+
+        input_path_str = payload.get("input_path", "") or ""
+        input_path = Path(input_path_str) if input_path_str else Path()
+
+        stem = output_stem or (input_path.stem if input_path.name else "output")
+        title_name = display_name or (input_path.name if input_path.name else "Recording")
+
         text = payload.get("text", "") or ""
         segments = payload.get("segments") or []
 
@@ -287,7 +401,7 @@ class MainWindow(QWidget):
         # 2) pop-up：顯示可選取文字的子視窗
         if self.config.get("output_popup", False):
             dlg = TranscriptPopupDialog(
-                title=f"Transcription - {input_path.name}",
+                title=f"Transcription - {title_name}",
                 text=text,
                 theme=self.config.get("theme", "dark"),
                 parent=self,
@@ -310,6 +424,7 @@ class MainWindow(QWidget):
             self.status_label.setText("Complete")
 
         self._busy = False
+        self._set_busy_controls(False)
         self._current_worker = None
         self._current_thread = None
 
@@ -323,6 +438,7 @@ class MainWindow(QWidget):
         self._show_error(message=message, details=details)
 
         self._busy = False
+        self._set_busy_controls(False)
         self._current_worker = None
         self._current_thread = None
 
@@ -332,12 +448,20 @@ class MainWindow(QWidget):
             self._show_idle_view()
             self.status_label.setText("Ready")
 
+    # -------------------------------------------------------------------------
+    # Model lifecycle
+    # -------------------------------------------------------------------------
+
     def _maybe_unload_model(self):
         """定期檢查是否可以卸載模型以釋放 VRAM"""
         if not self._busy and not self._queue:
-            ttl = int(self.config.get("model_ttl_seconds", 60))
+            ttl = int(self.config.get("model_ttl_seconds", 180))
             if ttl >= 0:
                 self.model_manager.maybe_unload()
+
+    # -------------------------------------------------------------------------
+    # Error dialog
+    # -------------------------------------------------------------------------
 
     def _play_error_sound(self) -> None:
         """播放系統錯誤提示音（盡量模擬 QMessageBox 的行為）。
@@ -435,8 +559,17 @@ class MainWindow(QWidget):
 
         dlg.exec()
 
-def closeEvent(self, event):
-        """視窗關閉事件：強制卸載模型"""
+    # -------------------------------------------------------------------------
+    # Lifecycle
+    # -------------------------------------------------------------------------
+
+    def closeEvent(self, event):
+        """視窗關閉事件：停止錄音 + 強制卸載模型"""
+        try:
+            self.record_area.shutdown()
+        except Exception:
+            pass
+
         self.model_manager.force_unload()
         super().closeEvent(event)
 

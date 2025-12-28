@@ -70,6 +70,17 @@ def build_stylesheet(pal: dict[str, str]) -> str:
         #DropHint, #StatusLabel {{
             color: {pal["hint"]};
         }}
+
+        #RecordTimer {{
+            font-size: 24px;
+            font-weight: 700;
+        }}
+        QPushButton#IconButton {{
+            padding: 6px;
+            min-width: 38px;
+            min-height: 38px;
+            border-radius: 8px;
+        }}
         QPushButton {{
             background: {pal["button_bg"]};
             color: {pal["text"]};
