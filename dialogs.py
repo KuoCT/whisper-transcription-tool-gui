@@ -16,6 +16,12 @@ from PySide6.QtWidgets import (
 )
 
 from app_config import DEFAULT_CONFIG
+from style import (
+    build_settings_dialog_stylesheet,
+    build_transcript_popup_stylesheet,
+    get_dialog_palette,
+)
+
 
 AVAILABLE_MODELS = ["tiny", "base", "small", "medium", "large", "turbo"]
 
@@ -29,65 +35,9 @@ class TranscriptPopupDialog(QDialog):
         self.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint)
         self.setMinimumSize(560, 420)
 
-        # 顏色沿用現有 Settings 的風格
-        if (theme or "").lower() == "light":
-            bg = "#ffffff"
-            fg = "#121417"
-            border = "#c7ccd6"
-            input_bg = "#f6f7fb"
-            accent = "#2a2c30"
-            hover = "#e8eaed"
-        else:
-            bg = "#1a1d23"
-            fg = "#e6e6e6"
-            border = "#3b3f4a"
-            input_bg = "#252931"
-            accent = "#395191"
-            hover = "#2a2f38"
-
-        self.setStyleSheet(f"""
-            QDialog {{
-                background: {bg};
-                color: {fg};
-                font-size: 13px;
-            }}
-            QTextEdit {{
-                background: {input_bg};
-                border: 1px solid {border};
-                border-radius: 8px;
-                padding: 10px;
-                color: {fg};
-                font-family: Consolas, 'Courier New', monospace;
-                font-size: 12px;
-            }}
-            QPushButton {{
-                background: {input_bg};
-                border: 1px solid {border};
-                border-radius: 6px;
-                padding: 8px 12px;
-                color: {fg};
-            }}
-            QPushButton:hover {{
-                border-color: {accent};
-                background: {hover};
-            }}
-            QPushButton:pressed {{
-                background: {accent};
-                color: #ffffff;
-            }}
-            QPushButton#primary {{
-                background: {accent};
-                color: #ffffff;
-                font-weight: 600;
-                border-color: {accent};
-            }}
-            QPushButton#primary:hover {{
-                background: #4a6ab5;
-            }}
-            QLabel {{
-                background: transparent;
-            }}
-        """)
+        # 由 style.py 統一管理顏色與 QSS，避免 dialogs.py 出現大量風格代碼
+        pal = get_dialog_palette(theme)
+        self.setStyleSheet(build_transcript_popup_stylesheet(pal))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -104,7 +54,7 @@ class TranscriptPopupDialog(QDialog):
         self.btn_copy = QPushButton("Copy")
         self.btn_copy.setObjectName("primary")
         self.btn_copy.setFixedWidth(90)
-        self.btn_copy.setFocusPolicy(Qt.NoFocus) # Copy 按鈕不要搶焦點
+        self.btn_copy.setFocusPolicy(Qt.NoFocus)  # Copy 按鈕不要搶焦點
         self.btn_copy.clicked.connect(self._copy_all)
 
         self.btn_close = QPushButton("Close")
@@ -115,16 +65,17 @@ class TranscriptPopupDialog(QDialog):
         row.addWidget(self.btn_copy)
         layout.addLayout(row)
 
-        self._text_cache = text or ""
+    def _copy_all(self) -> None:
+        """全選複製
 
-    def _copy_all(self):
-        """全選複製"""
-        # 在 Qt 中，剪貼簿要由 GUI thread 操作
+        備註：
+        - 在 Qt 中，剪貼簿要由 GUI thread 操作
+        """
         from PySide6.QtWidgets import QApplication
 
         # 全選 + 反白 + 複製
         self.text_edit.setFocus(Qt.OtherFocusReason)  # 確保反白顯示
-        self.text_edit.selectAll()                   # 反白（全選）
+        self.text_edit.selectAll()                    # 反白（全選）
         QApplication.clipboard().setText(self.text_edit.toPlainText())
 
 
@@ -143,20 +94,8 @@ class SettingsDialog(QWidget):
         self.setWindowModality(Qt.ApplicationModal)
 
         theme = self.config.get("theme", "dark")
-        if theme == "light":
-            self.bg = "#ffffff"
-            self.text = "#121417"
-            self.border = "#c7ccd6"
-            self.input_bg = "#f6f7fb"
-            self.accent = "#2a2c30"
-            self.hover = "#e8eaed"
-        else:
-            self.bg = "#1a1d23"
-            self.text = "#e6e6e6"
-            self.border = "#3b3f4a"
-            self.input_bg = "#252931"
-            self.accent = "#395191"
-            self.hover = "#2a2f38"
+        pal = get_dialog_palette(theme)
+        self.setStyleSheet(build_settings_dialog_stylesheet(pal))
 
         self._build_ui()
         self.adjustSize()
@@ -171,7 +110,8 @@ class SettingsDialog(QWidget):
         norm = " ".join(raw.lower().replace("_", " ").replace("-", " ").split())
 
         try:
-            from whisper.tokenizer import LANGUAGES  # 本地 import：避免在沒有 whisper 時造成啟動失敗
+            # 本地 import：避免在沒有 whisper 時造成啟動失敗
+            from whisper.tokenizer import LANGUAGES
         except Exception:
             return ""
 
@@ -186,69 +126,8 @@ class SettingsDialog(QWidget):
         }
         return name_to_code.get(norm, "")
 
-    def _build_ui(self):
+    def _build_ui(self) -> None:
         """構建 UI"""
-        self.setStyleSheet(f"""
-            QWidget {{
-                background: {self.bg};
-                color: {self.text};
-                font-size: 13px;
-            }}
-            QLabel, QComboBox, QLineEdit, QPushButton {{
-                background: {self.input_bg};
-                border: 1px solid {self.border};
-                border-radius: 6px;
-                padding: 8px 12px;
-            }}
-            QLabel {{
-                background: transparent;
-                border: none;
-                padding: 2px;
-            }}
-            QLabel#pathLabel {{
-                background: {self.input_bg};
-                border: 1px solid {self.border};
-                padding: 10px 12px;
-            }}
-            QComboBox:hover, QLineEdit:hover, QPushButton:hover {{
-                border-color: {self.accent};
-                background: {self.hover};
-            }}
-            QPushButton:pressed {{
-                background: {self.accent};
-                color: #ffffff;
-            }}
-            QPushButton#primary {{
-                background: {self.accent};
-                color: #ffffff;
-                font-weight: 600;
-                border-color: {self.accent};
-            }}
-            QPushButton#primary:hover {{
-                background: #4a6ab5;
-            }}
-            QComboBox::drop-down {{
-                border: none;
-                width: 0px;
-            }}
-            QLineEdit:focus {{
-                border-color: {self.accent};
-            }}
-            QComboBox QAbstractItemView {{
-                background: {self.input_bg};
-                border: 1px solid {self.border};
-                selection-background-color: {self.accent};
-            }}
-            QCheckBox {{
-                spacing: 8px;
-                padding: 2px 0px;
-            }}
-            QCheckBox::indicator {{
-                width: 16px;
-                height: 16px;
-            }}
-        """)
-
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
@@ -294,25 +173,27 @@ class SettingsDialog(QWidget):
         ttl_str = "Never" if ttl_value < 0 else str(ttl_value)
         self.ttl_combo = self._create_combo(
             ["30", "60", "120", "300", "600", "Never"],
-            ttl_str
+            ttl_str,
         )
         ttl_row.addWidget(ttl_label)
         ttl_row.addWidget(self.ttl_combo)
         layout.addLayout(ttl_row)
 
-        # 分隔線
+        # 分隔線（樣式由 QSS 統一控制）
         line = QLabel()
+        line.setObjectName("separatorLine")
         line.setFixedHeight(1)
-        line.setStyleSheet(f"background: {self.border};")
         layout.addWidget(line)
 
-        # 輸出選項（至少選一個）
+        # 輸出選項（可多選，但至少要選 1 個）
         out_title_row = QHBoxLayout()
         out_title_row.setSpacing(12)
         out_label = QLabel("Output")
         out_label.setFixedWidth(140)
+
         out_hint = QLabel("Select at least one")
-        out_hint.setStyleSheet(f"color: {self.text};")
+        out_hint.setObjectName("hintLabel")
+
         out_title_row.addWidget(out_label)
         out_title_row.addWidget(out_hint)
         out_title_row.addStretch(1)
@@ -340,8 +221,8 @@ class SettingsDialog(QWidget):
 
         # 分隔線
         line2 = QLabel()
+        line2.setObjectName("separatorLine")
         line2.setFixedHeight(1)
-        line2.setStyleSheet(f"background: {self.border};")
         layout.addWidget(line2)
 
         # 輸出路徑
@@ -349,6 +230,7 @@ class SettingsDialog(QWidget):
         output_row.setSpacing(12)
         output_label = QLabel("Output Folder")
         output_label.setFixedWidth(140)
+
         browse_btn = QPushButton("Browse...")
         browse_btn.clicked.connect(self._browse_output)
 
@@ -390,13 +272,13 @@ class SettingsDialog(QWidget):
         combo.setCurrentText(str(current))
         return combo
 
-    def _browse_output(self):
+    def _browse_output(self) -> None:
         """瀏覽輸出資料夾"""
         dir_path = QFileDialog.getExistingDirectory(self, "Select Output Directory")
         if dir_path:
             self.output_path_label.setText(dir_path)
 
-    def _save_settings(self):
+    def _save_settings(self) -> None:
         """保存設定"""
         self.config["theme"] = self.theme_combo.currentText()
         self.config["model_name"] = self.model_combo.currentText()
