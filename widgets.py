@@ -166,14 +166,27 @@ class WaveformBusyIndicator(QWidget):
 
 
 class MiniRecordIndicator(QWidget):
-    """RecordArea 左側的小動畫：4 條豎線（錄音時）/ 4 個點（閒置時）。
+    """RecordArea 的迷你動畫：豎線（錄音中）/ 點點（閒置時）。
 
-    原理跟 WaveformBusyIndicator 類似，但固定 4 個元素，讓 UI 更簡潔。
+    這個元件刻意做得「小而可控」：不追求寫實波形，只提供清楚的錄音狀態回饋。
+
+    你可以在 __init__ 這裡調整外觀參數：
+    - bar_count：豎線數量（例如 15）
+    - bar_width：單條豎線寬度
+    - bar_gap：豎線間距（等間隔）
+    - min_height_ratio / max_height_ratio：豎線高度範圍（相對於 widget 高度）
     """
 
     def __init__(
         self,
         accent: str,
+        *,
+        bar_count: int = 15,
+        bar_width: int = 3,
+        bar_gap: int = 3,
+        min_height_ratio: float = 0.25,
+        max_height_ratio: float = 0.90,
+        idle_dot_radius: float = 2.2,
         fps: int = 30,
         speed: float = 0.25,
         parent: QWidget | None = None,
@@ -188,16 +201,27 @@ class MiniRecordIndicator(QWidget):
         self._phase = 0.0
         self._speed = float(speed)
 
+        # --- 外觀參數（可調整豎線數量 / 間距 / 高度）---
+        self._bar_count = max(1, int(bar_count))
+        self._bar_width = max(1, int(bar_width))
+        self._bar_gap = max(0, int(bar_gap))
+        self._min_height_ratio = float(min_height_ratio)
+        self._max_height_ratio = float(max_height_ratio)
+        self._idle_dot_radius = float(idle_dot_radius)
+
         self._fps = max(1, int(fps))
         self._interval_ms = int(1000 / self._fps)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
 
-        self.setFixedWidth(44)
+        # 依照豎線數量估算一個合理寬度，避免「多條」時擠在一起看不清楚
+        total_w = self._bar_count * self._bar_width + (self._bar_count - 1) * self._bar_gap
+        self.setFixedWidth(max(44, total_w + 8))
         self.setMinimumHeight(24)
 
     def set_color(self, accent: str) -> None:
+        """設置顏色"""
         self._color = QColor(accent)
         self.update()
 
@@ -234,31 +258,34 @@ class MiniRecordIndicator(QWidget):
         painter.setPen(Qt.NoPen)
         painter.setBrush(self._color)
 
-        count = 4
-        gap = 6
-        bar_w = 5
+        count = self._bar_count
+        gap = self._bar_gap
+        bar_w = self._bar_width
+
         total_w = count * bar_w + (count - 1) * gap
         start_x = (w - total_w) / 2.0
 
         if not self._active:
-            # 閒置：豎線縮成 4 個點
-            radius = 2.2
+            # 閒置：豎線縮成點點（維持等間隔位置，不會跳動）
+            radius = max(1.0, self._idle_dot_radius)
             y = h * 0.65
             for i in range(count):
                 x = start_x + i * (bar_w + gap) + bar_w / 2.0
                 painter.drawEllipse(QRectF(x - radius, y - radius, radius * 2, radius * 2))
             return
 
-        # 錄音：4 條豎線隨時間跳動
-        min_h = max(4.0, h * 0.25)
-        max_h = max(min_h, h * 0.90)
+        # 錄音：豎線隨時間跳動（高度在 min/max 之間變化）
+        min_h = max(4.0, h * self._min_height_ratio)
+        max_h = max(min_h, h * self._max_height_ratio)
         radius = min(bar_w / 2.0, 4.0)
 
         for i in range(count):
-            v = math.sin(self._phase + i * 0.8) * 0.7 + math.sin(self._phase * 1.17 + i * 0.33) * 0.3
-            norm = (v + 1.0) / 2.0
-            bar_h = min_h + norm * (max_h - min_h)
+            v1 = math.sin(self._phase + i * 0.55)
+            v2 = math.sin(self._phase * 1.25 + i * 0.21 + 1.2)
+            mixed = v1 * 0.65 + v2 * 0.35  # 範圍約 [-1, 1]
+            norm = (mixed + 1.0) / 2.0     # -> [0, 1]
 
+            bar_h = min_h + norm * (max_h - min_h)
             x = start_x + i * (bar_w + gap)
             y = (h - bar_h) / 2.0
             painter.drawRoundedRect(QRectF(x, y, bar_w, bar_h), radius, radius)
@@ -302,11 +329,12 @@ class DropArea(PanelBase):
 
 
 class RecordArea(PanelBase):
-    """錄音區域：計時器 + (Record/Pause) + Undo + Transcribe。
+    """錄音區域：計時器 + Record + Pause + Undo + Transcribe。
 
     設計重點：
     - UI 只負責「錄音狀態」與「事件回呼」，實際轉譯流程由 MainWindow 控制。
     - 錄音資料不落地：AudioRecorder.stop() 回傳 numpy float32 waveform。
+    - 按鍵外觀走「卡帶機」邏輯：Record 會保持按下狀態，直到按下 Pause 才會彈起。
     """
 
     def __init__(
@@ -328,7 +356,8 @@ class RecordArea(PanelBase):
         self._asset_dir = asset_dir or (Path(__file__).resolve().parent / "asset")
         self._recorder = AudioRecorder(sample_rate=16000, channels=1)
 
-        self._state = "idle"  # idle / recording / paused
+        # 狀態機（idle / recording / paused）
+        self._state = "idle"
         self._elapsed_seconds = 0
 
         self._clock_timer = QTimer(self)
@@ -336,102 +365,159 @@ class RecordArea(PanelBase):
         self._clock_timer.timeout.connect(self._tick_clock)
 
         self._build_ui()
+        self._sync_ui()
 
     def _build_ui(self) -> None:
+        """建立 UI：左側計時器，中央動畫 + 四個圖示按鍵。
+
+        備註：
+        - 透明背景與外觀統一交給 style.py（QSS）管理。
+        - 這裡只放版面結構與行為綁定，避免 widgets.py 出現大量外觀代碼。
+        """
         root = QHBoxLayout()
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(12)
 
-        # 左側：迷你波形/點點
-        self.indicator = MiniRecordIndicator(self._pal["accent"])
-        root.addWidget(self.indicator, 0, Qt.AlignVCenter)
-
-        # 中間：計時器
-        self.timer_label = QLabel("0:00:00")
+        # 左側：計時器（HH:MM:SS，至少 2 位數；100 小時會顯示 100:00:00）
+        self.timer_label = QLabel("00:00:00")
         self.timer_label.setObjectName("RecordTimer")
         self.timer_label.setAlignment(Qt.AlignCenter)
-        root.addWidget(self.timer_label, 1)
 
-        # 右側：按鍵群（純圖示）
+        # 固定寬度避免版面被字寬影響（也保留 100:00:00 的空間）
+        self.timer_label.setFixedWidth(120)
+
+        root.addWidget(self.timer_label, 0, Qt.AlignVCenter)
+
+        # 中央：把動畫與按鍵群放在一起（背景必須透明，避免蓋住 PanelBase 的面板底色）
+        center_wrap = QWidget()
+        center_wrap.setObjectName("RecordCenterWrap")
+        center_wrap.setAttribute(Qt.WA_StyledBackground, True)
+
+        center_layout = QVBoxLayout(center_wrap)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(8)
+
+        # 中央：迷你動畫（錄音時跳動，閒置時為點點）
+        #
+        # 想調整「豎線數量 / 間距 / 長度」：
+        # - bar_count：豎線數量（目前先設 15）
+        # - bar_width / bar_gap：粗細與間距（等間隔）
+        # - min_height_ratio / max_height_ratio：豎線高度範圍（越大看起來越「長」）
+        self.indicator = MiniRecordIndicator(
+            self._pal["accent"],
+            bar_count=20,
+            bar_width=5,
+            bar_gap=5,
+            min_height_ratio=0.25,
+            max_height_ratio=0.90,
+        )
+
+        center_layout.addStretch(1)
+        center_layout.addWidget(self.indicator, 0, Qt.AlignHCenter)
+
+        # 底部四個按鈕
         btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
         btn_row.setSpacing(10)
 
-        self.btn_record_pause = self._make_icon_button("R", tooltip="Record / Pause")
-        self.btn_undo = self._make_icon_button("U", tooltip="Undo (clear recording)")
-        self.btn_transcribe = self._make_icon_button("T", tooltip="Transcribe (in-memory)")
+        # === 生成按鍵 ===
+        self.btn_record = self._make_icon_button(tooltip="Record")
+        self.btn_pause = self._make_icon_button(tooltip="Pause")
+        self.btn_undo = self._make_icon_button(tooltip="Undo (clear recording)")
+        self.btn_transcribe = self._make_icon_button(tooltip="Transcribe")
 
-        self.btn_record_pause.clicked.connect(self._on_record_pause_clicked)
+        self.btn_record.setCheckable(True)
+        self.btn_pause.setCheckable(True)
+
+        # === 綁定事件 ===
+        self.btn_record.clicked.connect(self._on_record_clicked)
+        self.btn_pause.clicked.connect(self._on_pause_clicked)
         self.btn_undo.clicked.connect(self._on_undo_clicked)
         self.btn_transcribe.clicked.connect(self._on_transcribe_clicked)
 
-        btn_row.addWidget(self.btn_record_pause)
+        # === 加入按鍵列 ===
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.btn_record)
+        btn_row.addWidget(self.btn_pause)
         btn_row.addWidget(self.btn_undo)
         btn_row.addWidget(self.btn_transcribe)
+        btn_row.addStretch(1)
 
-        btn_wrap = QWidget()
-        btn_wrap.setLayout(btn_row)
-        root.addWidget(btn_wrap, 0, Qt.AlignVCenter)
+        center_layout.addLayout(btn_row)
+        center_layout.addStretch(1)
 
+        # 加回主體
+        root.addWidget(center_wrap, 1)
         self.setLayout(root)
 
-        # 初始狀態
+        # 載入 icons（若檔案不存在，退化成顯示字母）
         self._apply_icon_paths()
-        self._sync_ui()
 
-    def _make_icon_button(self, fallback_text: str, tooltip: str = "") -> QPushButton:
-        btn = QPushButton()
+    def _make_icon_button(self, tooltip: str) -> QPushButton:
+        """建立純圖示按鈕（統一尺寸與行為）。
+
+        外觀（背景透明/外框/hover/checked）由 style.py 的 QPushButton#IconButton 統一控制。
+        """
+        btn = QPushButton("")
         btn.setObjectName("IconButton")
-        btn.setFixedSize(38, 38)
         btn.setToolTip(tooltip)
-        btn.setText(fallback_text)  # 若 icon 檔案不存在，至少還能操作/除錯
+        btn.setFixedSize(46, 46)
+        btn.setIconSize(QSize(28, 28))
         btn.setFocusPolicy(Qt.NoFocus)
+        btn.setAutoDefault(False)
+        btn.setCursor(Qt.PointingHandCursor)
         return btn
 
-    def _set_btn_icon(self, btn: QPushButton, png_path: Path, *, fallback_text: str) -> None:
-        if png_path.exists():
+    @staticmethod
+    def _set_btn_icon(btn: QPushButton, icon_path: Path, fallback_text: str = "") -> None:
+        if icon_path.exists():
             btn.setText("")
-            btn.setIcon(QIcon(str(png_path)))
-            btn.setIconSize(QSize(int(btn.width() * 0.62), int(btn.height() * 0.62)))
+            btn.setIcon(QIcon(str(icon_path)))
+            btn.setIconSize(QSize(28, 28))
         else:
-            # icon 尚未放入專案時：保留 fallback text
+            # 若沒有圖示檔案，先用字母代替，避免 UI 空白
             btn.setIcon(QIcon())
             btn.setText(fallback_text)
 
     def _apply_icon_paths(self) -> None:
-        """讀取 ./asset/ 的 png 圖示。
-
-        檔名是「預設值」：使用者可自行替換檔案（或改這裡的命名規則）。
-        """
         record_png = self._asset_dir / "record.png"
         pause_png = self._asset_dir / "pause.png"
         undo_png = self._asset_dir / "undo.png"
         transcribe_png = self._asset_dir / "transcribe.png"
 
-        # Record/Pause 由狀態決定 icon
-        self._record_png = record_png
-        self._pause_png = pause_png
-
+        self._set_btn_icon(self.btn_record, record_png, fallback_text="R")
+        self._set_btn_icon(self.btn_pause, pause_png, fallback_text="P")
         self._set_btn_icon(self.btn_undo, undo_png, fallback_text="U")
         self._set_btn_icon(self.btn_transcribe, transcribe_png, fallback_text="T")
 
     def _sync_ui(self) -> None:
-        """依照目前狀態同步 UI（文字、按鈕 enable、動畫）。"""
+        """依照目前狀態同步 UI（計時器、按鍵 enable、動畫、按下狀態）。"""
         self.timer_label.setText(self._format_time(self._elapsed_seconds))
 
-        if self._state == "recording":
-            self.indicator.set_active(True)
-            self._set_btn_icon(self.btn_record_pause, self._pause_png, fallback_text="P")
-            self.btn_transcribe.setEnabled(True)
-        elif self._state == "paused":
-            self.indicator.set_active(False)
-            self._set_btn_icon(self.btn_record_pause, self._record_png, fallback_text="R")
+        is_recording = self._state == "recording"
+        is_paused = self._state == "paused"
+
+        # 左側動畫：只在 recording 時播放
+        self.indicator.set_active(is_recording)
+
+        # 卡帶機效果：
+        # - recording：Record 按下去
+        # - paused：Pause 按下去（Record 彈起）
+        # - idle：兩個都彈起
+        self.btn_record.setChecked(is_recording)
+        self.btn_pause.setChecked(is_paused)
+
+        # 按鍵可用性
+        self.btn_pause.setEnabled(self._state in ("recording", "paused"))
+        self.btn_undo.setEnabled(self._elapsed_seconds > 0 or self._recorder.is_recording)
+
+        # Transcribe：
+        # - recording / paused：允許直接「停下來並轉譯」
+        # - idle：有錄音才可按
+        if self._state in ("recording", "paused"):
             self.btn_transcribe.setEnabled(True)
         else:
-            self.indicator.set_active(False)
-            self._set_btn_icon(self.btn_record_pause, self._record_png, fallback_text="R")
             self.btn_transcribe.setEnabled(self._elapsed_seconds > 0)
-
-        self.btn_undo.setEnabled(self._elapsed_seconds > 0 or self._recorder.is_recording)
 
     @staticmethod
     def _format_time(total_seconds: int) -> str:
@@ -439,18 +525,26 @@ class RecordArea(PanelBase):
         h = total_seconds // 3600
         m = (total_seconds % 3600) // 60
         s = total_seconds % 60
-        return f"{h}:{m:02d}:{s:02d}"
+        return f"{h:02d}:{m:02d}:{s:02d}"
 
     def _tick_clock(self) -> None:
         self._elapsed_seconds += 1
         self._sync_ui()
 
     def set_controls_enabled(self, enabled: bool) -> None:
-        """讓 MainWindow 在 BusyArea 時禁用/啟用按鍵。"""
+        """讓 MainWindow 在 BusyArea 時禁用/啟用按鍵。
+
+        注意：重新啟用時，需要依照目前狀態重新套用 enable/checked。
+        """
         enabled = bool(enabled)
-        self.btn_record_pause.setEnabled(enabled)
-        self.btn_undo.setEnabled(enabled)
-        self.btn_transcribe.setEnabled(enabled and (self._elapsed_seconds > 0 or self._state != "idle"))
+        if not enabled:
+            self.btn_record.setEnabled(False)
+            self.btn_pause.setEnabled(False)
+            self.btn_undo.setEnabled(False)
+            self.btn_transcribe.setEnabled(False)
+            return
+
+        self._sync_ui()
 
     def shutdown(self) -> None:
         """程式關閉時，保證錄音 stream 被關閉。"""
@@ -470,14 +564,37 @@ class RecordArea(PanelBase):
         self._elapsed_seconds = 0
         self._sync_ui()
 
-    def _on_record_pause_clicked(self) -> None:
+    # ---------------------------------------------------------------------
+    # Button handlers
+    # ---------------------------------------------------------------------
+
+    def _on_record_clicked(self) -> None:
+        """Record：開始錄音 / 續錄。
+
+        錄音中再次點擊 Record：不做狀態切換（維持「按下去」）。
+        """
         try:
             if self._state == "idle":
                 self._start_recording()
-            elif self._state == "recording":
+            elif self._state == "paused":
+                self._resume_recording()
+            else:
+                # recording：保持按下狀態（避免使用者誤點造成彈起）
+                self._sync_ui()
+        except Exception as exc:
+            self._on_error(str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
+
+    def _on_pause_clicked(self) -> None:
+        """Pause：只負責把錄音切到 paused。
+
+        paused 再次點擊 Pause：維持 paused（Pause 仍保持按下去）。
+        """
+        try:
+            if self._state == "recording":
                 self._pause_recording()
             else:
-                self._resume_recording()
+                # idle / paused：恢復 UI 到正確的鎖定狀態
+                self._sync_ui()
         except Exception as exc:
             self._on_error(str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
 
@@ -519,6 +636,7 @@ class RecordArea(PanelBase):
 
             audio = self._recorder.stop()
             self._state = "idle"
+
             # 按下 Transcribe 後：UI 回到可再次錄音的狀態
             recorded_seconds = int(self._elapsed_seconds)
             self._elapsed_seconds = 0

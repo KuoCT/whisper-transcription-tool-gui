@@ -26,7 +26,7 @@ def get_palette(theme: str) -> dict[str, str]:
         return {
             "window_bg": "#f6f7fb",
             "text": "#121417",
-            "panel_bg": "#ffffff",
+            "panel_bg": "#edf2fa",
             "border": "#c7ccd6",
             "hint": "#5a6370",
             "accent": "#ccd9f7",
@@ -53,7 +53,12 @@ def get_palette(theme: str) -> dict[str, str]:
 
 
 def build_stylesheet(pal: dict[str, str]) -> str:
-    """構建主視窗 Qt 樣式表"""
+    """構建主視窗 Qt 樣式表。
+
+    原則：
+    - widgets.py 只負責「結構與行為」，外觀一律由 QSS 控制，避免 style 分散。
+    - IconButton 預設背景透明，但保留外框；hover / pressed / checked 用外框變化呈現回饋。
+    """
     return f"""
         QWidget {{
             background: {pal["window_bg"]};
@@ -63,6 +68,7 @@ def build_stylesheet(pal: dict[str, str]) -> str:
         QLabel {{
             background: transparent;
         }}
+
         #DropLabel {{
             font-size: 18px;
             font-weight: 600;
@@ -71,16 +77,53 @@ def build_stylesheet(pal: dict[str, str]) -> str:
             color: {pal["hint"]};
         }}
 
+        /* RecordArea 中央區塊：必須透明，否則會被 QWidget 的 window_bg 蓋一層底 */
+        #RecordCenterWrap {{
+            background: transparent;
+        }}
+
         #RecordTimer {{
             font-size: 24px;
             font-weight: 700;
         }}
+
+        /* 純圖示按鈕：背景透明，但保留外框與互動狀態 */
         QPushButton#IconButton {{
-            padding: 6px;
-            min-width: 38px;
-            min-height: 38px;
-            border-radius: 8px;
+            background: transparent;
+            color: {pal["text"]};
+            border: 1px solid {pal["border"]};
+            border-radius: 10px;
+
+            padding: 0px;
+            min-width: 42px;
+            min-height: 42px;
         }}
+        QPushButton#IconButton:hover {{
+            background: transparent;
+            border-color: {pal["accent"]};
+        }}
+        QPushButton#IconButton:pressed {{
+            background: transparent;
+            border-color: {pal["accent"]};
+        }}
+
+        /* checkable icon button：用外框加粗/變色模擬「按下去卡住」 */
+        QPushButton#IconButton:checked {{
+            background: transparent;
+            border: 2px solid {pal["accent"]};
+        }}
+        QPushButton#IconButton:checked:hover {{
+            background: transparent;
+            border: 2px solid {pal["accent"]};
+        }}
+
+        QPushButton#IconButton:disabled {{
+            background: transparent;
+            border-color: {pal["border"]};
+            color: {pal["hint"]};
+        }}
+
+        /* 一般按鈕（不影響 IconButton，因為 IconButton 有更高 selector specificity） */
         QPushButton {{
             background: {pal["button_bg"]};
             color: {pal["text"]};
@@ -95,6 +138,7 @@ def build_stylesheet(pal: dict[str, str]) -> str:
         QPushButton:pressed {{
             background: {pal["border"]};
         }}
+
         QMessageBox {{
             background: {pal["panel_bg"]};
         }}
@@ -105,6 +149,7 @@ def build_stylesheet(pal: dict[str, str]) -> str:
             padding: 6px 12px;
         }}
     """
+
 
 
 # =============================================================================
