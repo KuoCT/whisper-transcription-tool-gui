@@ -147,39 +147,15 @@ def _dialog_primary_colors(pal: dict[str, str]) -> tuple[str, str]:
     return pal["accent"], _mix_hex(pal["accent"], "#ffffff", 0.22)
 
 
-def _svg_check_mark_data_uri(stroke_hex: str = "#ffffff") -> str:
-    """產生 CheckBox 勾勾的 SVG data URI。
-
-    用 data URI 的好處：
-    - 不用額外放圖片檔案
-    - QSS 可直接使用 image: url(...)
-    """
-    svg = (
-        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 10'>"
-        f"<path d='M1 5l3 3 7-7' fill='none' stroke='{stroke_hex}' "
-        "stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/>"
-        "</svg>"
-    )
-
-    # Data URI 的內容建議做 URL encode，避免 `#`, 空白, `<` 等字元造成解析問題
-    encoded = quote(svg, safe="")
-    return "data:image/svg+xml;utf8," + encoded
-
-
 def _build_flat_checkbox_qss(
     *,
     border: str,
     unchecked_bg: str,
     disabled_bg: str,
     check_bg: str,
-    check_hover: str,
-    check_svg: str,
+    check_hover: str
 ) -> str:
-    """生成可復用的扁平化 CheckBox QSS。
-
-    這個專案多處需要一致的 CheckBox 風格（Settings / Error dialog 等），
-    因此把樣式集中在 style.py，避免各檔案重複貼 QSS。
-    """
+    """生成可復用的扁平化 CheckBox QSS。"""
     return f"""
         /* --- Flat checkbox --- */
         QCheckBox {{
@@ -188,8 +164,8 @@ def _build_flat_checkbox_qss(
             padding: 4px 0px;
         }}
         QCheckBox::indicator {{
-            width: 16px;
-            height: 16px;
+            width: 18px;
+            height: 18px;
             border-radius: 4px;
             border: 1px solid {border};
             background: {unchecked_bg};
@@ -200,7 +176,6 @@ def _build_flat_checkbox_qss(
         QCheckBox::indicator:checked {{
             border: 1px solid {check_bg};
             background: {check_bg};
-            image: url("{check_svg}");
         }}
         QCheckBox::indicator:checked:hover {{
             border: 1px solid {check_hover};
@@ -220,14 +195,12 @@ def build_error_dialog_stylesheet(pal: dict[str, str]) -> str:
     這裡沿用主 palette，使 error dialog 與主視窗維持一致的視覺語言；
     同時復用 Settings 相同的 CheckBox 外觀。
     """
-    check_svg = _svg_check_mark_data_uri(_on_color(pal["check_bg"]))
     checkbox_qss = _build_flat_checkbox_qss(
         border=pal["border"],
         unchecked_bg=pal["input_bg"],
         disabled_bg=pal["button_hover"],
         check_bg=pal["check_bg"],
-        check_hover=pal["check_hover"],
-        check_svg=check_svg,
+        check_hover=pal["check_hover"]
     )
     primary_text = _on_color(pal["accent"], light=pal["text"])
 
@@ -341,14 +314,12 @@ def build_settings_dialog_stylesheet(pal: dict[str, str]) -> str:
     primary_text = _on_color(primary_bg, light=pal["text"])
     hover_bg = pal["button_hover"]
 
-    check_svg = _svg_check_mark_data_uri(_on_color(pal["check_bg"]))
     checkbox_qss = _build_flat_checkbox_qss(
         border=pal["border"],
         unchecked_bg=pal["input_bg"],
         disabled_bg=hover_bg,
         check_bg=pal["check_bg"],
         check_hover=pal["check_hover"],
-        check_svg=check_svg,
     )
 
     return f"""
