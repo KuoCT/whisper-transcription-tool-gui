@@ -138,6 +138,121 @@ def _svg_check_mark_data_uri(stroke_hex: str = "#ffffff") -> str:
     return "data:image/svg+xml;utf8," + encoded
 
 
+def _build_flat_checkbox_qss(
+    *,
+    border: str,
+    input_bg: str,
+    hover_bg: str,
+    accent: str,
+    accent_hover: str,
+    check_svg: str,
+) -> str:
+    """生成可復用的扁平化 CheckBox QSS。
+
+    這個專案多處需要一致的 CheckBox 風格（Settings / Error dialog 等），
+    因此把樣式集中在 style.py，避免各檔案重複貼 QSS。
+    """
+    return f"""
+        /* --- Flat checkbox --- */
+        QCheckBox {{
+            background: transparent;
+            spacing: 8px;
+            padding: 4px 0px;
+        }}
+        QCheckBox::indicator {{
+            width: 16px;
+            height: 16px;
+            border-radius: 4px;
+            border: 1px solid {border};
+            background: {input_bg};
+        }}
+        QCheckBox::indicator:hover {{
+            border-color: {accent};
+        }}
+        QCheckBox::indicator:checked {{
+            border: 1px solid {accent};
+            background: {accent};
+            image: url("{check_svg}");
+        }}
+        QCheckBox::indicator:checked:hover {{
+            border: 1px solid {accent_hover};
+            background: {accent_hover};
+        }}
+        QCheckBox::indicator:disabled {{
+            border: 1px solid {border};
+            background: {hover_bg};
+            image: none;
+        }}
+    """
+
+
+def build_error_dialog_stylesheet(pal: dict[str, str]) -> str:
+    """Error dialog（可 resize 的 QDialog）樣式。
+
+    使用主視窗 get_palette() 的調色板，維持與主視窗一致的視覺語言；
+    同時復用與 Settings 相同的 CheckBox 外觀。
+    """
+    check_svg = _svg_check_mark_data_uri("#ffffff")
+    checkbox_qss = _build_flat_checkbox_qss(
+        border=pal["border"],
+        input_bg=pal["window_bg"],
+        hover_bg=pal["button_hover"],
+        accent=pal["accent"],
+        accent_hover=pal["button_hover"],
+        check_svg=check_svg,
+    )
+
+    return f"""
+        QDialog {{
+            background: {pal["panel_bg"]};
+            color: {pal["text"]};
+            font-size: 13px;
+        }}
+
+        QLabel {{
+            background: transparent;
+        }}
+        QLabel#ErrorTitle {{
+            font-size: 15px;
+            font-weight: 700;
+        }}
+
+        QTextEdit {{
+            background: {pal["window_bg"]};
+            border: 1px solid {pal["border"]};
+            border-radius: 8px;
+            padding: 10px;
+            color: {pal["text"]};
+        }}
+        QTextEdit#ErrorDetails {{
+            font-family: Consolas, 'Courier New', monospace;
+            font-size: 12px;
+        }}
+
+        QPushButton {{
+            background: {pal["button_bg"]};
+            color: {pal["text"]};
+            border: 1px solid {pal["border"]};
+            border-radius: 6px;
+            padding: 8px 16px;
+            font-size: 13px;
+        }}
+        QPushButton:hover {{
+            background: {pal["button_hover"]};
+        }}
+        QPushButton#primary {{
+            background: {pal["accent"]};
+            color: #ffffff;
+            border-color: {pal["accent"]};
+            font-weight: 600;
+        }}
+        QPushButton#primary:hover {{
+            background: {pal["button_hover"]};
+        }}
+
+        {checkbox_qss}
+    """
+
 def build_transcript_popup_stylesheet(pal: dict[str, str]) -> str:
     """TranscriptPopupDialog 的樣式"""
     return f"""
@@ -188,6 +303,14 @@ def build_transcript_popup_stylesheet(pal: dict[str, str]) -> str:
 def build_settings_dialog_stylesheet(pal: dict[str, str]) -> str:
     """SettingsDialog 的樣式（含扁平化 CheckBox）"""
     check_svg = _svg_check_mark_data_uri("#ffffff")
+    checkbox_qss = _build_flat_checkbox_qss(
+        border=pal["border"],
+        input_bg=pal["input_bg"],
+        hover_bg=pal["hover"],
+        accent=pal["accent"],
+        accent_hover=pal["accent_hover"],
+        check_svg=check_svg,
+    )
 
     return f"""
         QWidget {{
@@ -259,34 +382,6 @@ def build_settings_dialog_stylesheet(pal: dict[str, str]) -> str:
             selection-color: #ffffff;
         }}
 
-        /* --- Flat checkbox --- */
-        QCheckBox {{
-            background: transparent;
-            spacing: 8px;
-            padding: 4px 0px;
-        }}
-        QCheckBox::indicator {{
-            width: 16px;
-            height: 16px;
-            border-radius: 4px;
-            border: 1px solid {pal["border"]};
-            background: {pal["input_bg"]};
-        }}
-        QCheckBox::indicator:hover {{
-            border-color: {pal["accent"]};
-        }}
-        QCheckBox::indicator:checked {{
-            border: 1px solid {pal["accent"]};
-            background: {pal["accent"]};
-            image: url("{check_svg}");
-        }}
-        QCheckBox::indicator:checked:hover {{
-            border: 1px solid {pal["accent_hover"]};
-            background: {pal["accent_hover"]};
-        }}
-        QCheckBox::indicator:disabled {{
-            border: 1px solid {pal["border"]};
-            background: {pal["hover"]};
-            image: none;
-        }}
+        {checkbox_qss}
     """
+

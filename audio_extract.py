@@ -31,11 +31,11 @@ def ensure_ffmpeg_available() -> None:
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path is None:
         raise RuntimeError(
-            "找不到 ffmpeg（系統 PATH 內無 ffmpeg）。"
-            "請先安裝 ffmpeg 並加入 PATH 後再重試。"
-            "安裝方式參考："
-            "- Windows: winget install Gyan.FFmpeg 或 choco install ffmpeg"
-            "- macOS  : brew install ffmpeg"
+            "FFmpeg was not found in your PATH. "
+            "Please install FFmpeg and add it to PATH, then try again.\n"
+            "Installation:\n"
+            "- Windows: winget install Gyan.FFmpeg  (or: choco install ffmpeg)\n"
+            "- macOS : brew install ffmpeg\n"
             "- Ubuntu : sudo apt-get update && sudo apt-get install -y ffmpeg"
         )
 
@@ -49,8 +49,8 @@ def ensure_ffmpeg_available() -> None:
         )
     except Exception as e:
         raise RuntimeError(
-            "偵測到 ffmpeg 路徑，但執行 ffmpeg -version 失敗。"
-            "請確認 ffmpeg 安裝正確、具有執行權限，且 PATH 設定無誤。"
+            "FFmpeg was found, but running `ffmpeg -version` failed. "
+            "Please verify your FFmpeg installation, executable permissions, and PATH configuration."
         ) from e
 
 
@@ -124,7 +124,7 @@ def _run_ffmpeg(cmd: list[str]) -> None:
         )
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
-            "ffmpeg 轉檔失敗，錯誤訊息：" + (e.stderr or "<no stderr>")
+            "FFmpeg conversion failed. Error: " + (e.stderr or "<no stderr>")
         ) from e
 
 
@@ -272,7 +272,7 @@ def extract_audio_bytes(
         return p.stdout
     except subprocess.CalledProcessError as e:
         stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else "<no stderr>"
-        raise RuntimeError("ffmpeg 抽取音訊失敗，錯誤訊息：" + stderr) from e
+        raise RuntimeError("FFmpeg failed to extract audio. Error: " + stderr) from e
 
 
 def extract_audio_array(
@@ -335,12 +335,12 @@ def extract_audio_array(
         )
     except subprocess.CalledProcessError as e:
         stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else "<no stderr>"
-        raise RuntimeError("ffmpeg 抽取音訊失敗，錯誤訊息：" + stderr) from e
+        raise RuntimeError("FFmpeg failed to extract audio. Error: " + stderr) from e
 
     # bytes -> int16 -> float32 (-1 ~ 1)
     audio_i16 = np.frombuffer(p.stdout, dtype=np.int16)
     if audio_i16.size == 0:
-        raise RuntimeError("ffmpeg 回傳空音訊（可能是輸入檔無音軌或解碼失敗）。")
+        raise RuntimeError("FFmpeg returned empty audio (the input may have no audio track or decoding failed).")
 
     if channels > 1:
         # (n_frames, channels) -> 取平均成 mono

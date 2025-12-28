@@ -33,7 +33,7 @@ class TranscriptPopupDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint)
-        self.setMinimumSize(560, 420)
+        self.setMinimumSize(500, 400)
 
         # 由 style.py 統一管理顏色與 QSS，避免 dialogs.py 出現大量風格代碼
         pal = get_dialog_palette(theme)

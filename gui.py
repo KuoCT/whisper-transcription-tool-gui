@@ -13,12 +13,15 @@ from PySide6.QtWidgets import (
     QStackedLayout,
     QVBoxLayout,
     QWidget,
+    QDialog,
+    QCheckBox,
+    QTextEdit,
 )
 from app_config import load_config, save_config
 from dialogs import SettingsDialog, TranscriptPopupDialog
 from model_manager import ModelManager
 from output_utils import write_srt, write_txt
-from style import build_stylesheet, get_palette
+from style import build_error_dialog_stylesheet, build_stylesheet, get_palette
 from widgets import BusyArea, DropArea, WaveformBusyIndicator
 from worker import TranscribeWorker
 
@@ -315,9 +318,10 @@ class MainWindow(QWidget):
         else:
             self._show_idle_view()
 
-    def _on_worker_error(self, message: str):
+    def _on_worker_error(self, message: str, details: str = ""):
         """工作器錯誤"""
-        self._show_error(f"Processing failed:\n{message}")
+        self._show_error(message=message, details=details)
+
         self._busy = False
         self._current_worker = None
         self._current_thread = None
@@ -335,11 +339,103 @@ class MainWindow(QWidget):
             if ttl >= 0:
                 self.model_manager.maybe_unload()
 
-    def _show_error(self, message: str):
-        """顯示錯誤訊息（平面風格）"""
-        QMessageBox.critical(self, "Error", message)
+    def _play_error_sound(self) -> None:
+        """播放系統錯誤提示音（盡量模擬 QMessageBox 的行為）。
 
-    def closeEvent(self, event):
+        備註：
+        - Windows 優先使用 winsound.MessageBeep（錯誤音效較接近 QMessageBox）
+        - 其他平台或失敗時，退回 QApplication.beep()
+        """
+        try:
+            import winsound  # type: ignore
+
+            winsound.MessageBeep(winsound.MB_ICONHAND)
+            return
+        except Exception:
+            pass
+
+        try:
+            QApplication.beep()
+        except Exception:
+            pass
+
+    def _show_error(self, message: str, details: str = "") -> None:
+        """顯示可調整大小的錯誤對話框（取代 QMessageBox）。
+
+        設計重點：
+        - 主訊息保持精簡，避免與 traceback 重複。
+        - traceback 放在可切換的 details 區塊，方便閱讀與複製。
+        - 視覺樣式集中到 style.py 統一管理，避免 GUI 檔案塞滿 QSS。
+        """
+        self._play_error_sound()
+
+        theme = (
+            (self.config.get("theme") or "dark")
+            if hasattr(self, "config")
+            else "dark"
+        )
+        pal = get_palette(theme)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Error")
+        dlg.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint)
+        dlg.setMinimumSize(400, 400)
+        dlg.setSizeGripEnabled(True)
+        dlg.setStyleSheet(build_error_dialog_stylesheet(pal))
+
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        title = QLabel("Processing failed")
+        title.setObjectName("ErrorTitle")
+        root.addWidget(title)
+
+        msg_view = QTextEdit()
+        msg_view.setObjectName("ErrorMessage")
+        msg_view.setReadOnly(True)
+        msg_view.setPlainText(message or "Unknown error")
+        msg_view.setMinimumHeight(140)
+        msg_view.setLineWrapMode(QTextEdit.WidgetWidth)
+        root.addWidget(msg_view, 1)
+
+        details_toggle = QCheckBox("Show details")
+
+        details_view = QTextEdit()
+        details_view.setObjectName("ErrorDetails")
+        details_view.setReadOnly(True)
+        details_view.setPlainText(details or "")
+        details_view.setVisible(False)
+        details_view.setLineWrapMode(QTextEdit.NoWrap)
+
+        if (details or "").strip():
+            details_toggle.toggled.connect(details_view.setVisible)
+            root.addWidget(details_toggle)
+            root.addWidget(details_view, 2)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+
+        btn_copy = QPushButton("Copy")
+        btn_ok = QPushButton("OK")
+        btn_ok.setObjectName("primary")
+
+        def _copy_all() -> None:
+            text = msg_view.toPlainText()
+            if (details or "").strip():
+                text = text + "\n\n" + details_view.toPlainText()
+            QApplication.clipboard().setText(text)
+
+        btn_copy.clicked.connect(_copy_all)
+        btn_ok.clicked.connect(dlg.accept)
+
+        btn_row.addWidget(btn_copy)
+        btn_row.addWidget(btn_ok)
+        root.addLayout(btn_row)
+
+        dlg.exec()
+
+def closeEvent(self, event):
         """視窗關閉事件：強制卸載模型"""
         self.model_manager.force_unload()
         super().closeEvent(event)

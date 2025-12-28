@@ -9,7 +9,7 @@ class TranscribeWorker(QObject):
 
     progress = Signal(str)
     finished = Signal(dict)
-    error = Signal(str)
+    error = Signal(str, str)
 
     def __init__(self, input_path: Path, model_manager, language_hint: str = ""):
         super().__init__()
@@ -51,5 +51,7 @@ class TranscribeWorker(QObject):
             }
             self.finished.emit(payload)
         except Exception as exc:
-            tb = traceback.format_exc()
-            self.error.emit(f"{exc}\n\n{tb}")
+            # UI 端會把錯誤主訊息與 traceback 分開顯示，避免重複且更好閱讀
+            message = str(exc).strip() or exc.__class__.__name__
+            tb = traceback.format_exc().strip()
+            self.error.emit(message, tb)
