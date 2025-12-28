@@ -1,5 +1,4 @@
 import math
-
 from PySide6.QtCore import Qt, QTimer, QRectF
 from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QPainter, QPen
 from PySide6.QtWidgets import (

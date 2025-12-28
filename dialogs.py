@@ -1,7 +1,4 @@
 from __future__ import annotations
-
-from pathlib import Path
-
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -107,6 +104,7 @@ class TranscriptPopupDialog(QDialog):
         self.btn_copy = QPushButton("Copy")
         self.btn_copy.setObjectName("primary")
         self.btn_copy.setFixedWidth(90)
+        self.btn_copy.setFocusPolicy(Qt.NoFocus) # Copy 按鈕不要搶焦點
         self.btn_copy.clicked.connect(self._copy_all)
 
         self.btn_close = QPushButton("Close")
@@ -124,7 +122,10 @@ class TranscriptPopupDialog(QDialog):
         # 在 Qt 中，剪貼簿要由 GUI thread 操作
         from PySide6.QtWidgets import QApplication
 
-        QApplication.clipboard().setText(self._text_cache)
+        # 全選 + 反白 + 複製
+        self.text_edit.setFocus(Qt.OtherFocusReason)  # 確保反白顯示
+        self.text_edit.selectAll()                   # 反白（全選）
+        QApplication.clipboard().setText(self.text_edit.toPlainText())
 
 
 class SettingsDialog(QWidget):

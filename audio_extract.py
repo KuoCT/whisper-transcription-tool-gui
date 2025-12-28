@@ -9,7 +9,6 @@ audio_extract.py
 """
 
 from __future__ import annotations
-
 import os
 import shutil
 import subprocess
@@ -359,68 +358,288 @@ ensure_ffmpeg_available()
 
 
 # =========================
-# CLI 測試入口
+# CLI 入口
 # =========================
 
 if __name__ == "__main__":
     import sys
-    import tkinter as tk
-    from tkinter import filedialog
+    from pathlib import Path
 
-    # 建立 tkinter root，但不顯示主視窗
-    root = tk.Tk()
-    root.withdraw()
-
-    # 從 registry 動態產生檔案過濾條件
-    video_exts = MEDIA_REGISTRY["video"].extensions
-    audio_exts = MEDIA_REGISTRY["audio"].extensions
-    all_exts = sorted(video_exts | audio_exts)
-
-    filetypes = [
-        ("Media files", [f"*.{ext}" for ext in all_exts]),
-        ("All files", "*.*"),
-    ]
-
-    # 開啟檔案選擇視窗
-    input_file = filedialog.askopenfilename(
-        title="選擇影片或音樂檔",
-        filetypes=filetypes,
+    from PySide6.QtCore import QObject, Qt, QUrl, Signal, Slot, QProcess
+    from PySide6.QtGui import QDesktopServices
+    from PySide6.QtWidgets import (
+        QApplication,
+        QCheckBox,
+        QComboBox,
+        QDialog,
+        QDialogButtonBox,
+        QFileDialog,
+        QFormLayout,
+        QHBoxLayout,
+        QLabel,
+        QLineEdit,
+        QMessageBox,
+        QPushButton,
+        QProgressDialog,
+        QSpinBox,
+        QVBoxLayout,
     )
 
-    # 使用者取消
+    def _build_media_filter() -> str:
+        video_exts = sorted(MEDIA_REGISTRY["video"].extensions)
+        audio_exts = sorted(MEDIA_REGISTRY["audio"].extensions)
+        all_exts = sorted(set(video_exts) | set(audio_exts))
+        media_patterns = " ".join([f"*.{ext}" for ext in all_exts])
+        return f"Media files ({media_patterns});;All files (*)"
+
+    def _default_output_file(input_path: Path, fmt: str) -> Path:
+        return input_path.with_suffix(f".{fmt}")
+
+    class ConvertWorker(QObject):
+        """使用 QProcess 執行 ffmpeg，不會阻塞事件循環"""
+        finished = Signal(object)  # Path
+        failed = Signal(str)
+
+        def __init__(
+            self,
+            input_path: Path,
+            output_file: Path,
+            output_format: str,
+            sample_rate: int,
+            bitrate: str,
+            channels: int,
+        ) -> None:
+            super().__init__()
+            self.input_path = input_path
+            self.output_file = output_file
+            self.output_format = output_format
+            self.sample_rate = sample_rate
+            self.bitrate = bitrate
+            self.channels = channels
+            self.process = None
+
+        @Slot()
+        def run(self) -> None:
+            """組裝 ffmpeg 指令並用 QProcess 執行"""
+            try:
+                # 確保輸出目錄存在
+                self.output_file.parent.mkdir(parents=True, exist_ok=True)
+
+                # 組裝指令
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-loglevel", "error",
+                    "-i", str(self.input_path),
+                    "-vn",
+                    "-ar", str(self.sample_rate),
+                    "-ac", str(self.channels),
+                ]
+
+                if self.output_format == "mp3":
+                    cmd += ["-b:a", self.bitrate]
+
+                cmd.append(str(self.output_file))
+
+                # 使用 QProcess
+                self.process = QProcess()
+                self.process.finished.connect(self._on_finished)
+                self.process.errorOccurred.connect(self._on_error)
+                
+                # 啟動 ffmpeg
+                self.process.start(cmd[0], cmd[1:])
+                
+            except Exception as e:
+                self.failed.emit(f"準備轉檔時發生錯誤：{e}")
+
+        @Slot(int, QProcess.ExitStatus)
+        def _on_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
+            """ffmpeg 執行完畢"""
+            if exit_code == 0 and exit_status == QProcess.ExitStatus.NormalExit:
+                self.finished.emit(self.output_file)
+            else:
+                stderr = self.process.readAllStandardError().data().decode('utf-8', errors='replace')
+                self.failed.emit(f"ffmpeg 轉檔失敗 (exit code: {exit_code})\n{stderr}")
+            
+            self.process.deleteLater()
+            self.process = None
+
+        @Slot(QProcess.ProcessError)
+        def _on_error(self, error: QProcess.ProcessError) -> None:
+            """QProcess 發生錯誤"""
+            error_msg = f"QProcess 錯誤：{error}"
+            if self.process:
+                stderr = self.process.readAllStandardError().data().decode('utf-8', errors='replace')
+                if stderr:
+                    error_msg += f"\n{stderr}"
+            self.failed.emit(error_msg)
+
+    class ConvertDialog(QDialog):
+        def __init__(self, input_path: Path, parent=None) -> None:
+            super().__init__(parent)
+            self.setWindowTitle("Audio Convert")
+
+            self.input_path = input_path
+            self._output_customized = False
+            self.worker = None
+
+            layout = QVBoxLayout(self)
+            layout.addWidget(QLabel(f"Input: {input_path}"))
+
+            form = QFormLayout()
+
+            self.format_combo = QComboBox()
+            self.format_combo.addItems(["mp3", "wav"])
+            form.addRow("Format", self.format_combo)
+
+            self.sr_spin = QSpinBox()
+            self.sr_spin.setRange(8000, 192000)
+            self.sr_spin.setSingleStep(1000)
+            self.sr_spin.setValue(48000)
+            form.addRow("Sample rate (Hz)", self.sr_spin)
+
+            self.channels_combo = QComboBox()
+            self.channels_combo.addItems(["1 (mono)", "2 (stereo)"])
+            self.channels_combo.setCurrentIndex(1)
+            form.addRow("Channels", self.channels_combo)
+
+            self.bitrate_combo = QComboBox()
+            self.bitrate_combo.addItems(["96k", "128k", "160k", "192k", "256k", "320k"])
+            self.bitrate_combo.setCurrentText("192k")
+            form.addRow("Bitrate (mp3)", self.bitrate_combo)
+
+            out_row = QHBoxLayout()
+            self.output_edit = QLineEdit()
+            self.output_edit.setText(str(_default_output_file(input_path, "mp3")))
+            self.output_btn = QPushButton("Browse…")
+            self.output_btn.setFocusPolicy(Qt.NoFocus)
+            out_row.addWidget(self.output_edit, 1)
+            out_row.addWidget(self.output_btn)
+            form.addRow("Output file", out_row)
+
+            self.open_dir_chk = QCheckBox("Open output folder when done")
+            self.open_dir_chk.setChecked(True)
+            form.addRow("", self.open_dir_chk)
+
+            layout.addLayout(form)
+
+            self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+            self.convert_btn = QPushButton("Convert")
+            self.convert_btn.setDefault(True)
+            self.buttons.addButton(self.convert_btn, QDialogButtonBox.AcceptRole)
+            layout.addWidget(self.buttons)
+
+            self.buttons.rejected.connect(self.reject)
+            self.convert_btn.clicked.connect(self._on_convert)
+            self.output_btn.clicked.connect(self._browse_output)
+            self.output_edit.textEdited.connect(self._mark_output_customized)
+            self.format_combo.currentTextChanged.connect(self._sync_widgets_by_format)
+            self.format_combo.currentTextChanged.connect(self._maybe_update_output_by_format)
+
+            self._sync_widgets_by_format(self.format_combo.currentText())
+
+        def _mark_output_customized(self) -> None:
+            self._output_customized = True
+
+        def _sync_widgets_by_format(self, fmt: str) -> None:
+            is_mp3 = fmt == "mp3"
+            self.bitrate_combo.setEnabled(is_mp3)
+
+        def _maybe_update_output_by_format(self, fmt: str) -> None:
+            if self._output_customized:
+                return
+            self.output_edit.setText(str(_default_output_file(self.input_path, fmt)))
+
+        def _browse_output(self) -> None:
+            fmt = self.format_combo.currentText()
+            suggested = self.output_edit.text().strip() or str(_default_output_file(self.input_path, fmt))
+            file_filter = f"{fmt.upper()} (*.{fmt});;All files (*)"
+            out_path, _ = QFileDialog.getSaveFileName(self, "Save output as…", suggested, file_filter)
+            if out_path:
+                self._output_customized = True
+                self.output_edit.setText(out_path)
+
+        def _read_params(self) -> tuple[Path, str, int, str, int, bool]:
+            fmt = self.format_combo.currentText()
+            sr = int(self.sr_spin.value())
+            channels = 1 if self.channels_combo.currentIndex() == 0 else 2
+            bitrate = self.bitrate_combo.currentText()
+
+            output_text = self.output_edit.text().strip()
+            if not output_text:
+                output_file = _default_output_file(self.input_path, fmt)
+            else:
+                output_file = Path(output_text)
+
+            if output_file.suffix.lower() != f".{fmt}":
+                output_file = output_file.with_suffix(f".{fmt}")
+
+            if sr <= 0:
+                raise ValueError("Sample rate must be a positive integer.")
+            if channels not in {1, 2}:
+                raise ValueError("Channels must be 1 or 2.")
+
+            open_dir = self.open_dir_chk.isChecked()
+            return output_file, fmt, sr, bitrate, channels, open_dir
+
+        def _on_convert(self) -> None:
+            try:
+                output_file, fmt, sr, bitrate, channels, open_dir = self._read_params()
+            except Exception as e:
+                QMessageBox.critical(self, "Invalid settings", str(e))
+                return
+
+            self.convert_btn.setEnabled(False)
+
+            progress = QProgressDialog("Converting…", "Cancel", 0, 0, self)
+            progress.setWindowTitle("Please wait")
+            progress.setWindowModality(Qt.ApplicationModal)
+            progress.setCancelButton(None)  # 暫時不支援取消
+            progress.show()
+
+            # 建立 Worker（不需要 QThread，QProcess 本身就是非阻塞的）
+            self.worker = ConvertWorker(
+                input_path=self.input_path,
+                output_file=output_file,
+                output_format=fmt,
+                sample_rate=sr,
+                bitrate=bitrate,
+                channels=channels,
+            )
+
+            @Slot(object)
+            def _done(out_path_obj) -> None:
+                progress.close()
+                self.convert_btn.setEnabled(True)
+                out_path = Path(out_path_obj)
+                QMessageBox.information(self, "Done", f"Output:\n{out_path}")
+                if open_dir:
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(out_path.parent)))
+                self.accept()
+
+            @Slot(str)
+            def _fail(msg: str) -> None:
+                progress.close()
+                self.convert_btn.setEnabled(True)
+                QMessageBox.critical(self, "Failed", msg)
+
+            self.worker.finished.connect(_done)
+            self.worker.failed.connect(_fail)
+            self.worker.run()
+
+    app = QApplication(sys.argv)
+
+    media_filter = _build_media_filter()
+    input_file, _ = QFileDialog.getOpenFileName(
+        None,
+        "Select a video or audio file",
+        "",
+        media_filter,
+    )
     if not input_file:
-        print("未選擇任何檔案，程式結束")
         raise SystemExit(0)
 
-    input_path = Path(input_file)
-    output_base = input_path.with_suffix("")
+    dlg = ConvertDialog(Path(input_file))
+    dlg.exec()
 
-    def open_folder(path: Path) -> None:
-        """跨平台開啟資料夾
-        - Windows  : Explorer
-        - macOS    : Finder
-        - Linux    : xdg-open
-        """
-        path = path.resolve()
-        if not path.exists():
-            raise FileNotFoundError(path)
-
-        if sys.platform.startswith("win"):
-            os.startfile(path)  # type: ignore
-        elif sys.platform == "darwin":
-            subprocess.run(["open", str(path)])
-        else:
-            subprocess.run(["xdg-open", str(path)])
-
-    # 執行音訊抽取（輸出成檔案）
-    try:
-        output_audio = extract_audio(
-            input_path=input_path,
-            output_path=output_base,
-            output_format="mp3",
-        )
-        open_folder(output_audio.parent)
-        print(f"完成：{output_audio}")
-    except Exception as e:
-        print(f"錯誤: {e}")
-        raise SystemExit(1)
+    raise SystemExit(0)

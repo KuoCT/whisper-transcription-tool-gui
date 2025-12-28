@@ -3,7 +3,6 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
@@ -15,7 +14,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 from app_config import load_config, save_config
 from dialogs import SettingsDialog, TranscriptPopupDialog
 from model_manager import ModelManager
