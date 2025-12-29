@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 from app_config import load_config, save_config
 from dialogs import SettingsDialog, TranscriptPopupDialog
 from model_manager import ModelManager
-from output_utils import write_srt, write_txt
+from output_utils import format_transcript, write_srt, write_txt
 from style import build_error_dialog_stylesheet, build_stylesheet, get_palette
 from widgets import BusyArea, DropArea, RecordArea, WaveformBusyIndicator
 from worker import TranscribeWorker
@@ -329,14 +329,7 @@ class MainWindow(QWidget):
             display_name=input_path.name,
             output_stem=input_path.stem,
         )
-        worker.progress.connect(self._on_worker_progress)
-        worker.finished.connect(self._on_worker_finished)
-        worker.error.connect(self._on_worker_error)
-
-        thread = threading.Thread(target=worker.run, daemon=True)
-        self._current_worker = worker
-        self._current_thread = thread
-        thread.start()
+        self._start_worker_thread(worker)
 
     # -------------------------------------------------------------------------
     # Recording pipeline (in-memory)
@@ -363,6 +356,10 @@ class MainWindow(QWidget):
             display_name="Recording",
             output_stem=stem,
         )
+        self._start_worker_thread(worker)
+
+    def _start_worker_thread(self, worker: TranscribeWorker) -> None:
+        """共用啟動流程：綁定 signal + 啟動執行緒。"""
         worker.progress.connect(self._on_worker_progress)
         worker.finished.connect(self._on_worker_finished)
         worker.error.connect(self._on_worker_error)
@@ -391,18 +388,19 @@ class MainWindow(QWidget):
         stem = output_stem or (input_path.stem if input_path.name else "output")
         title_name = display_name or (input_path.name if input_path.name else "Recording")
 
-        text = payload.get("text", "") or ""
+        raw_text = payload.get("text", "") or ""
         segments = payload.get("segments") or []
+        formatted_text = format_transcript(raw_text, segments)
 
         # 1) clipboard：直接寫入剪貼簿
         if self.config.get("output_clipboard", False):
-            QApplication.clipboard().setText(text)
+            QApplication.clipboard().setText(raw_text)
 
         # 2) pop-up：顯示可選取文字的子視窗
         if self.config.get("output_popup", False):
             dlg = TranscriptPopupDialog(
                 title=f"Transcription - {title_name}",
-                text=text,
+                text=formatted_text,
                 theme=self.config.get("theme", "dark"),
                 parent=self,
             )
@@ -414,7 +412,7 @@ class MainWindow(QWidget):
         # 3) 檔案輸出
         saved_paths: list[Path] = []
         if self.config.get("output_txt", True):
-            saved_paths.append(write_txt(self.output_dir, stem, text))
+            saved_paths.append(write_txt(self.output_dir, stem, formatted_text))
         if self.config.get("output_srt", True):
             saved_paths.append(write_srt(self.output_dir, stem, segments))
 

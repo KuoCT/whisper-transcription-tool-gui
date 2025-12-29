@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 
-# =============================================================================
 # Theme Palettes
-# =============================================================================
 # 這個專案的 QSS（Qt Style Sheet）集中放在這個檔案管理，避免顏色/圓角/按鈕樣式
 # 散落在各個檔案中，後續要改 UI 只需改這裡。
-#
 # 使用方式：
 # - 主視窗（MainWindow）：get_palette() + build_stylesheet()
 # - Dialog / Settings / Popup：get_palette() + build_*_dialog_stylesheet()
@@ -51,6 +48,143 @@ def get_palette(theme: str) -> dict[str, str]:
     }
 
 
+# -------------------------------------------------------------------------
+# QSS Helpers
+# -------------------------------------------------------------------------
+
+def _qss_block(selector: str, props: dict[str, str | int | None]) -> str:
+    """組合 QSS 區塊，集中管理屬性內容。"""
+    lines = [f"{selector} {{"]
+    for key, value in props.items():
+        if value is None:
+            continue
+        lines.append(f"    {key}: {value};")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _build_dialog_base_qss(selector: str, pal: dict[str, str], *, font_size: int = 13) -> str:
+    """Dialog/面板基底樣式（背景、字色、字級）。"""
+    return _qss_block(
+        selector,
+        {
+            "background": pal["panel_bg"],
+            "color": pal["text"],
+            "font-size": f"{font_size}px",
+        },
+    )
+
+
+def _build_button_base_qss(
+    *,
+    bg: str,
+    text: str | None,
+    border: str,
+    radius: int,
+    padding: str,
+    font_size: int | None = None,
+    selector: str = "QPushButton",
+) -> str:
+    """通用按鈕基底樣式（依不同場景調整 padding/字級）。"""
+    return _qss_block(
+        selector,
+        {
+            "background": bg,
+            "color": text,
+            "border": f"1px solid {border}",
+            "border-radius": f"{radius}px",
+            "padding": padding,
+            "font-size": f"{font_size}px" if font_size is not None else None,
+        },
+    )
+
+
+def _build_button_primary_qss(
+    *,
+    bg: str,
+    text: str,
+    border: str,
+    hover_bg: str | None = None,
+    hover_border: str | None = None,
+    selector: str = "QPushButton#primary",
+) -> str:
+    """Dialog 內 primary 按鈕樣式（可選 hover）。"""
+    blocks = [
+        _qss_block(
+            selector,
+            {
+                "background": bg,
+                "color": text,
+                "border-color": border,
+                "font-weight": 600,
+            },
+        )
+    ]
+    if hover_bg is not None or hover_border is not None:
+        blocks.append(
+            _qss_block(
+                f"{selector}:hover",
+                {
+                    "background": hover_bg,
+                    "border-color": hover_border,
+                },
+            )
+        )
+    return "\n".join(blocks)
+
+
+def _build_input_base_qss(
+    *,
+    selectors: str,
+    bg: str,
+    border: str,
+    radius: int,
+    padding: str,
+) -> str:
+    """輸入元件（ComboBox/LineEdit）基底樣式。"""
+    return _qss_block(
+        selectors,
+        {
+            "background": bg,
+            "border": f"1px solid {border}",
+            "border-radius": f"{radius}px",
+            "padding": padding,
+        },
+    )
+
+
+def _build_text_edit_base_qss(
+    *,
+    bg: str,
+    text: str,
+    border: str,
+    radius: int = 8,
+    padding: str = "10px",
+) -> str:
+    """TextEdit 基底樣式，供 Error/Popup 共用。"""
+    return _qss_block(
+        "QTextEdit",
+        {
+            "background": bg,
+            "border": f"1px solid {border}",
+            "border-radius": f"{radius}px",
+            "padding": padding,
+            "color": text,
+        },
+    )
+
+
+def _build_text_edit_mono_qss(selector: str, *, font_size: int = 12) -> str:
+    """TextEdit 等寬字體設定（mono/font-size）。"""
+    return _qss_block(
+        selector,
+        {
+            "font-family": "Consolas, 'Courier New', monospace",
+            "font-size": f"{font_size}px",
+        },
+    )
+
+
 def build_stylesheet(pal: dict[str, str]) -> str:
     """構建主視窗 Qt 樣式表。
 
@@ -58,6 +192,90 @@ def build_stylesheet(pal: dict[str, str]) -> str:
     - widgets.py 只負責「結構與行為」，外觀一律由 QSS 控制，避免 style 分散。
     - IconButton 預設背景透明，但保留外框；hover / pressed / checked 用外框變化呈現回饋。
     """
+    icon_button_qss = "\n".join(
+        [
+            _qss_block(
+                "QPushButton#IconButton",
+                {
+                    "background": "transparent",
+                    "color": pal["text"],
+                    "border": f"1px solid {pal['border']}",
+                    "border-radius": "10px",
+                    "padding": "0px",
+                    "min-width": "42px",
+                    "min-height": "42px",
+                },
+            ),
+            _qss_block(
+                "QPushButton#IconButton:hover",
+                {
+                    "background": "transparent",
+                    "border-color": pal["accent"],
+                },
+            ),
+            _qss_block(
+                "QPushButton#IconButton:pressed",
+                {
+                    "background": "transparent",
+                    "border-color": pal["accent"],
+                },
+            ),
+            _qss_block(
+                "QPushButton#IconButton:checked",
+                {
+                    "background": "transparent",
+                    "border": f"2px solid {pal['accent']}",
+                },
+            ),
+            _qss_block(
+                "QPushButton#IconButton:checked:hover",
+                {
+                    "background": "transparent",
+                    "border": f"2px solid {pal['accent']}",
+                },
+            ),
+            _qss_block(
+                "QPushButton#IconButton:disabled",
+                {
+                    "background": "transparent",
+                    "border-color": pal["border"],
+                    "color": pal["hint"],
+                },
+            ),
+        ]
+    )
+
+    button_base_qss = _build_button_base_qss(
+        bg=pal["button_bg"],
+        text=pal["text"],
+        border=pal["border"],
+        radius=6,
+        padding="8px 16px",
+        font_size=13,
+    )
+    button_hover_qss = _qss_block(
+        "QPushButton:hover",
+        {
+            "background": pal["button_hover"],
+        },
+    )
+    button_pressed_qss = _qss_block(
+        "QPushButton:pressed",
+        {
+            "background": pal["border"],
+        },
+    )
+
+    messagebox_button_qss = _qss_block(
+        "QMessageBox QPushButton",
+        {
+            "min-width": "80px",
+            "border": f"1px solid {pal['border']}",
+            "border-radius": "4px",
+            "padding": "6px 12px",
+        },
+    )
+
     return f"""
         QWidget {{
             background: {pal["window_bg"]};
@@ -87,73 +305,23 @@ def build_stylesheet(pal: dict[str, str]) -> str:
         }}
 
         /* 純圖示按鈕：背景透明，但保留外框與互動狀態 */
-        QPushButton#IconButton {{
-            background: transparent;
-            color: {pal["text"]};
-            border: 1px solid {pal["border"]};
-            border-radius: 10px;
-
-            padding: 0px;
-            min-width: 42px;
-            min-height: 42px;
-        }}
-        QPushButton#IconButton:hover {{
-            background: transparent;
-            border-color: {pal["accent"]};
-        }}
-        QPushButton#IconButton:pressed {{
-            background: transparent;
-            border-color: {pal["accent"]};
-        }}
-
-        /* checkable icon button：用外框加粗/變色模擬「按下去卡住」 */
-        QPushButton#IconButton:checked {{
-            background: transparent;
-            border: 2px solid {pal["accent"]};
-        }}
-        QPushButton#IconButton:checked:hover {{
-            background: transparent;
-            border: 2px solid {pal["accent"]};
-        }}
-
-        QPushButton#IconButton:disabled {{
-            background: transparent;
-            border-color: {pal["border"]};
-            color: {pal["hint"]};
-        }}
+        {icon_button_qss}
 
         /* 一般按鈕（不影響 IconButton，因為 IconButton 有更高 selector specificity） */
-        QPushButton {{
-            background: {pal["button_bg"]};
-            color: {pal["text"]};
-            border: 1px solid {pal["border"]};
-            border-radius: 6px;
-            padding: 8px 16px;
-            font-size: 13px;
-        }}
-        QPushButton:hover {{
-            background: {pal["button_hover"]};
-        }}
-        QPushButton:pressed {{
-            background: {pal["border"]};
-        }}
+        {button_base_qss}
+        {button_hover_qss}
+        {button_pressed_qss}
 
         QMessageBox {{
             background: {pal["panel_bg"]};
         }}
-        QMessageBox QPushButton {{
-            min-width: 80px;
-            border: 1px solid {pal["border"]};
-            border-radius: 4px;
-            padding: 6px 12px;
-        }}
+        {messagebox_button_qss}
     """
 
 
-
-# =============================================================================
+# -------------------------------------------------------------------------
 # Dialog Styles
-# =============================================================================
+# -------------------------------------------------------------------------
 
 def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
     """將 #RRGGBB 轉成 (r, g, b)（0-255）。"""
@@ -244,68 +412,78 @@ def _build_flat_checkbox_qss(
     """
 
 
+def _build_checkbox_qss_from_palette(pal: dict[str, str], *, disabled_bg: str) -> str:
+    """從 palette 組合 CheckBox QSS，集中管理顏色對應。"""
+    return _build_flat_checkbox_qss(
+        border=pal["border"],
+        unchecked_bg=pal["input_bg"],
+        disabled_bg=disabled_bg,
+        check_bg=pal["check_bg"],
+        check_hover=pal["check_hover"],
+    )
+
+
 def build_error_dialog_stylesheet(pal: dict[str, str]) -> str:
     """Error dialog（可 resize 的 QDialog）樣式。
 
     這裡沿用主 palette，使 error dialog 與主視窗維持一致的視覺語言；
     同時復用 Settings 相同的 CheckBox 外觀。
     """
-    checkbox_qss = _build_flat_checkbox_qss(
-        border=pal["border"],
-        unchecked_bg=pal["input_bg"],
-        disabled_bg=pal["button_hover"],
-        check_bg=pal["check_bg"],
-        check_hover=pal["check_hover"]
-    )
+    checkbox_qss = _build_checkbox_qss_from_palette(pal, disabled_bg=pal["button_hover"])
     primary_text = _on_color(pal["accent"], light=pal["text"])
 
+    base_dialog_qss = _build_dialog_base_qss("QDialog", pal)
+    label_base_qss = _qss_block("QLabel", {"background": "transparent"})
+    title_qss = _qss_block(
+        "QLabel#ErrorTitle",
+        {
+            "font-size": "15px",
+            "font-weight": 700,
+        },
+    )
+
+    text_edit_qss = _build_text_edit_base_qss(
+        bg=pal["input_bg"],
+        text=pal["text"],
+        border=pal["border"],
+        radius=8,
+        padding="10px",
+    )
+    details_qss = _build_text_edit_mono_qss("QTextEdit#ErrorDetails", font_size=12)
+
+    button_base_qss = _build_button_base_qss(
+        bg=pal["button_bg"],
+        text=pal["text"],
+        border=pal["border"],
+        radius=6,
+        padding="8px 16px",
+        font_size=13,
+    )
+    button_hover_qss = _qss_block(
+        "QPushButton:hover",
+        {
+            "background": pal["button_hover"],
+        },
+    )
+    primary_button_qss = _build_button_primary_qss(
+        bg=pal["accent"],
+        text=primary_text,
+        border=pal["accent"],
+        hover_bg=pal["button_hover"],
+    )
+
     return f"""
-        QDialog {{
-            background: {pal["panel_bg"]};
-            color: {pal["text"]};
-            font-size: 13px;
-        }}
+        {base_dialog_qss}
 
-        QLabel {{
-            background: transparent;
-        }}
-        QLabel#ErrorTitle {{
-            font-size: 15px;
-            font-weight: 700;
-        }}
+        {label_base_qss}
+        {title_qss}
 
-        QTextEdit {{
-            background: {pal["input_bg"]};
-            border: 1px solid {pal["border"]};
-            border-radius: 8px;
-            padding: 10px;
-            color: {pal["text"]};
-        }}
-        QTextEdit#ErrorDetails {{
-            font-family: Consolas, 'Courier New', monospace;
-            font-size: 12px;
-        }}
+        {text_edit_qss}
+        {details_qss}
 
-        QPushButton {{
-            background: {pal["button_bg"]};
-            color: {pal["text"]};
-            border: 1px solid {pal["border"]};
-            border-radius: 6px;
-            padding: 8px 16px;
-            font-size: 13px;
-        }}
-        QPushButton:hover {{
-            background: {pal["button_hover"]};
-        }}
-        QPushButton#primary {{
-            background: {pal["accent"]};
-            color: {primary_text};
-            border-color: {pal["accent"]};
-            font-weight: 600;
-        }}
-        QPushButton#primary:hover {{
-            background: {pal["button_hover"]};
-        }}
+        {button_base_qss}
+        {button_hover_qss}
+        {primary_button_qss}
 
         {checkbox_qss}
     """
@@ -317,57 +495,62 @@ def build_transcript_popup_stylesheet(pal: dict[str, str]) -> str:
     primary_text = _on_color(primary_bg, light=pal["text"])
     hover_bg = pal["button_hover"]
 
+    base_dialog_qss = _build_dialog_base_qss("QDialog", pal)
+    text_edit_qss = _build_text_edit_base_qss(
+        bg=pal["input_bg"],
+        text=pal["text"],
+        border=pal["border"],
+        radius=8,
+        padding="10px",
+    )
+    text_edit_mono_qss = _build_text_edit_mono_qss("QTextEdit", font_size=12)
+
+    button_base_qss = _build_button_base_qss(
+        bg=pal["button_bg"],
+        text=pal["text"],
+        border=pal["border"],
+        radius=6,
+        padding="8px 12px",
+    )
+    button_hover_qss = _qss_block(
+        "QPushButton:hover",
+        {
+            "border-color": pal["accent"],
+            "background": hover_bg,
+        },
+    )
+    button_pressed_qss = _qss_block(
+        "QPushButton:pressed",
+        {
+            "background": primary_bg,
+            "color": primary_text,
+        },
+    )
+    primary_button_qss = _build_button_primary_qss(
+        bg=primary_bg,
+        text=primary_text,
+        border=primary_bg,
+        hover_bg=primary_hover,
+        hover_border=primary_hover,
+    )
+    icon_button_qss = _qss_block("QPushButton#IconButton", {"padding": "0px"})
+    label_base_qss = _qss_block("QLabel", {"background": "transparent"})
+
     return f"""
-        QDialog {{
-            background: {pal["panel_bg"]};
-            color: {pal["text"]};
-            font-size: 13px;
-        }}
-        QTextEdit {{
-            background: {pal["input_bg"]};
-            border: 1px solid {pal["border"]};
-            border-radius: 8px;
-            padding: 10px;
-            color: {pal["text"]};
-            font-family: Consolas, 'Courier New', monospace;
-            font-size: 12px;
-        }}
-        QPushButton {{
-            background: {pal["button_bg"]};
-            border: 1px solid {pal["border"]};
-            border-radius: 6px;
-            padding: 8px 12px;
-            color: {pal["text"]};
-        }}
+        {base_dialog_qss}
+        {text_edit_qss}
+        {text_edit_mono_qss}
+        {button_base_qss}
 
         /* Popup 內的工具按鈕（Zoom In/Out）：
            - 使用 objectName = IconButton
            - padding 置 0，避免 fixedSize 時內容被擠壓
         */
-        QPushButton#IconButton {{
-            padding: 0px;
-        }}
-        QPushButton:hover {{
-            border-color: {pal["accent"]};
-            background: {hover_bg};
-        }}
-        QPushButton:pressed {{
-            background: {primary_bg};
-            color: {primary_text};
-        }}
-        QPushButton#primary {{
-            background: {primary_bg};
-            color: {primary_text};
-            font-weight: 600;
-            border-color: {primary_bg};
-        }}
-        QPushButton#primary:hover {{
-            background: {primary_hover};
-            border-color: {primary_hover};
-        }}
-        QLabel {{
-            background: transparent;
-        }}
+        {icon_button_qss}
+        {button_hover_qss}
+        {button_pressed_qss}
+        {primary_button_qss}
+        {label_base_qss}
     """
 
 
@@ -377,40 +560,66 @@ def build_settings_dialog_stylesheet(pal: dict[str, str]) -> str:
     primary_text = _on_color(primary_bg, light=pal["text"])
     hover_bg = pal["button_hover"]
 
-    checkbox_qss = _build_flat_checkbox_qss(
+    checkbox_qss = _build_checkbox_qss_from_palette(pal, disabled_bg=hover_bg)
+
+    base_dialog_qss = _build_dialog_base_qss("QWidget", pal)
+    label_base_qss = _qss_block(
+        "QLabel",
+        {
+            "background": "transparent",
+            "border": "none",
+            "padding": "2px",
+        },
+    )
+    input_base_qss = _build_input_base_qss(
+        selectors="QComboBox, QLineEdit",
+        bg=pal["input_bg"],
         border=pal["border"],
-        unchecked_bg=pal["input_bg"],
-        disabled_bg=hover_bg,
-        check_bg=pal["check_bg"],
-        check_hover=pal["check_hover"],
+        radius=6,
+        padding="8px 12px",
+    )
+    button_base_qss = _build_button_base_qss(
+        bg=pal["button_bg"],
+        text=None,
+        border=pal["border"],
+        radius=6,
+        padding="8px 12px",
+    )
+    hover_qss = _qss_block(
+        "QComboBox:hover, QLineEdit:hover, QPushButton:hover",
+        {
+            "border-color": pal["accent"],
+            "background": hover_bg,
+        },
+    )
+    focus_qss = _qss_block(
+        "QLineEdit:focus",
+        {
+            "border-color": pal["accent"],
+        },
+    )
+    pressed_qss = _qss_block(
+        "QPushButton:pressed",
+        {
+            "background": primary_bg,
+            "color": primary_text,
+        },
+    )
+    primary_button_qss = _build_button_primary_qss(
+        bg=primary_bg,
+        text=primary_text,
+        border=primary_bg,
+        hover_bg=primary_hover,
+        hover_border=primary_hover,
     )
 
     return f"""
-        QWidget {{
-            background: {pal["panel_bg"]};
-            color: {pal["text"]};
-            font-size: 13px;
-        }}
+        {base_dialog_qss}
 
         /* --- Base controls --- */
-        QLabel {{
-            background: transparent;
-            border: none;
-            padding: 2px;
-        }}
-
-        QComboBox, QLineEdit {{
-            background: {pal["input_bg"]};
-            border: 1px solid {pal["border"]};
-            border-radius: 6px;
-            padding: 8px 12px;
-        }}
-        QPushButton {{
-            background: {pal["button_bg"]};
-            border: 1px solid {pal["border"]};
-            border-radius: 6px;
-            padding: 8px 12px;
-        }}
+        {label_base_qss}
+        {input_base_qss}
+        {button_base_qss}
 
         QLabel#pathLabel {{
             background: {pal["input_bg"]};
@@ -429,28 +638,11 @@ def build_settings_dialog_stylesheet(pal: dict[str, str]) -> str:
             color: {pal["hint"]};
         }}
 
-        QComboBox:hover, QLineEdit:hover, QPushButton:hover {{
-            border-color: {pal["accent"]};
-            background: {hover_bg};
-        }}
-        QLineEdit:focus {{
-            border-color: {pal["accent"]};
-        }}
+        {hover_qss}
+        {focus_qss}
 
-        QPushButton:pressed {{
-            background: {primary_bg};
-            color: {primary_text};
-        }}
-        QPushButton#primary {{
-            background: {primary_bg};
-            color: {primary_text};
-            font-weight: 600;
-            border-color: {primary_bg};
-        }}
-        QPushButton#primary:hover {{
-            background: {primary_hover};
-            border-color: {primary_hover};
-        }}
+        {pressed_qss}
+        {primary_button_qss}
 
         QComboBox::drop-down {{
             border: none;
