@@ -68,6 +68,13 @@ class MainWindow(QWidget):
         self._current_worker: TranscribeWorker | None = None
         self._current_thread: threading.Thread | None = None
 
+        # 錄音期間模型預載/保活
+        self._record_hold_lock = threading.Lock()
+        self._record_hold_active = False
+        self._record_hold_acquired = False
+        self._record_hold_token = 0
+        self._record_transcribe_inflight = False
+
         # 避免 pop-up 被 GC 回收
         self._popup_refs: list[TranscriptPopupDialog] = []
 
@@ -94,6 +101,8 @@ class MainWindow(QWidget):
             get_input_device=self._get_input_device,
             on_transcribe=self._transcribe_recorded_audio,
             on_error=self._show_error,
+            on_record_start=self._on_recording_started,
+            on_record_cancel=self._on_recording_canceled,
             asset_dir=(base_dir / "asset"),
         )
 
@@ -247,6 +256,8 @@ class MainWindow(QWidget):
             get_input_device=self._get_input_device,
             on_transcribe=self._transcribe_recorded_audio,
             on_error=self._show_error,
+            on_record_start=self._on_recording_started,
+            on_record_cancel=self._on_recording_canceled,
             asset_dir=(base_dir / "asset"),
         )
         self.busy_area = BusyArea(self._pal, self.wave_indicator, self.status_label)
@@ -290,6 +301,65 @@ class MainWindow(QWidget):
             return int(self.config.get("input_device", -1))
         except Exception:
             return -1
+
+    def _on_recording_started(self) -> None:
+        """錄音開始時預載模型，避免錄完才載入。"""
+        self._begin_record_hold()
+
+    def _on_recording_canceled(self) -> None:
+        """錄音取消/重置時釋放模型保活。"""
+        self._record_transcribe_inflight = False
+        self._end_record_hold()
+
+    def _begin_record_hold(self) -> None:
+        """建立錄音期間的模型保活，並在背景預載。"""
+        with self._record_hold_lock:
+            if self._record_hold_active:
+                return
+            self._record_hold_active = True
+            self._record_hold_acquired = False
+            self._record_hold_token += 1
+            token = self._record_hold_token
+
+        threading.Thread(
+            target=self._warmup_record_model,
+            args=(token,),
+            daemon=True,
+        ).start()
+
+    def _warmup_record_model(self, token: int) -> None:
+        """背景預載模型，並在必要時自動釋放保活。"""
+        try:
+            self.model_manager.acquire()
+        except Exception:
+            with self._record_hold_lock:
+                if token == self._record_hold_token:
+                    self._record_hold_active = False
+                    self._record_hold_acquired = False
+            return
+
+        release_now = False
+        with self._record_hold_lock:
+            if token != self._record_hold_token or not self._record_hold_active:
+                release_now = True
+            else:
+                self._record_hold_acquired = True
+
+        if release_now:
+            self.model_manager.release()
+
+    def _end_record_hold(self) -> None:
+        """結束錄音保活，允許模型正常 TTL 卸載。"""
+        release_now = False
+        with self._record_hold_lock:
+            if not self._record_hold_active:
+                return
+            self._record_hold_active = False
+            release_now = self._record_hold_acquired
+            self._record_hold_acquired = False
+
+        if release_now:
+            self.model_manager.release()
 
     # -------------------------------------------------------------------------
     # File drop pipeline
@@ -348,6 +418,7 @@ class MainWindow(QWidget):
         self._set_busy_controls(True)
         self._show_busy_view()
         self.status_label.setText("Transcribing recording...")
+        self._record_transcribe_inflight = True
 
         worker = TranscribeWorker(
             audio=audio,
@@ -427,6 +498,10 @@ class MainWindow(QWidget):
         self._current_worker = None
         self._current_thread = None
 
+        if self._record_transcribe_inflight:
+            self._record_transcribe_inflight = False
+            self._end_record_hold()
+
         if self._queue:
             self._start_next_if_idle()
         else:
@@ -440,6 +515,10 @@ class MainWindow(QWidget):
         self._set_busy_controls(False)
         self._current_worker = None
         self._current_thread = None
+
+        if self._record_transcribe_inflight:
+            self._record_transcribe_inflight = False
+            self._end_record_hold()
 
         if self._queue:
             self._start_next_if_idle()

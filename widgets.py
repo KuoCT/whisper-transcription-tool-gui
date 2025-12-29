@@ -344,6 +344,8 @@ class RecordArea(PanelBase):
         get_input_device,
         on_transcribe,
         on_error,
+        on_record_start=None,
+        on_record_cancel=None,
         asset_dir: Path | None = None,
     ):
         super().__init__(panel_bg=pal["panel_bg"], border=pal["border"], radius=12)
@@ -352,6 +354,8 @@ class RecordArea(PanelBase):
         self._get_input_device = get_input_device
         self._on_transcribe = on_transcribe
         self._on_error = on_error
+        self._on_record_start = on_record_start
+        self._on_record_cancel = on_record_cancel
 
         self._asset_dir = asset_dir or (Path(__file__).resolve().parent / "asset")
         self._recorder = AudioRecorder(sample_rate=16000, channels=1)
@@ -556,6 +560,11 @@ class RecordArea(PanelBase):
 
     def reset_recording(self) -> None:
         """強制停止並清空錄音（切換模式或主題時可用）。"""
+        had_activity = (
+            self._state != "idle"
+            or self._elapsed_seconds > 0
+            or self._recorder.is_recording
+        )
         self._clock_timer.stop()
         try:
             self._recorder.reset()
@@ -564,6 +573,9 @@ class RecordArea(PanelBase):
         self._state = "idle"
         self._elapsed_seconds = 0
         self._sync_ui()
+
+        if had_activity and self._on_record_cancel:
+            self._on_record_cancel()
 
     # -------------------------------------------------------------------------
     # Button handlers
@@ -610,6 +622,9 @@ class RecordArea(PanelBase):
         if not self._clock_timer.isActive():
             self._clock_timer.start()
 
+        if self._on_record_start:
+            self._on_record_start()
+
         self._sync_ui()
 
     def _pause_recording(self) -> None:
@@ -646,17 +661,23 @@ class RecordArea(PanelBase):
             # 避免空音訊
             if audio is None or getattr(audio, "size", 0) <= 0:
                 self._on_error("No recorded audio.", "")
+                if self._on_record_cancel:
+                    self._on_record_cancel()
                 return
 
             # 很短的音訊往往只有環境雜訊，保守加個門檻
             if recorded_seconds <= 0:
                 self._on_error("Recorded audio is too short.", "")
+                if self._on_record_cancel:
+                    self._on_record_cancel()
                 return
 
             self._on_transcribe(audio)
 
         except Exception as exc:
             self._on_error(str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
+            if self._on_record_cancel:
+                self._on_record_cancel()
 
 
 class BusyArea(PanelBase):
