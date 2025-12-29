@@ -655,7 +655,7 @@ class MainWindow(QWidget):
 
 
 if __name__ == "__main__":
-    print("Whisper Transcription Tool (refactor)")
+    print("Whisper Transcription Tool")
     app = QApplication([])
     win = MainWindow()
     win.show()
