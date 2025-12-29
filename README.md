@@ -3,7 +3,7 @@
 ![fig_2](./asset/demo2-1.png)
 ![fig_3](./asset/demo3-1.png)
 
-A desktop GUI for transcribing **audio/video files** and **microphone recordings** using **OpenAI Whisper** (local inference).
+A desktop GUI for transcribing **audio/video files** and **microphone recordings** using [**OpenAI Whisper**](https://github.com/openai/whisper) (local inference).
 
 Built with **PySide6** and designed to be simple:
 - Drag & drop media files to transcribe
