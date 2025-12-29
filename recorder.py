@@ -1,5 +1,6 @@
 from __future__ import annotations
 import threading
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -115,6 +116,11 @@ class AudioRecorder:
         self._chunks: list[Any] = []
         self._paused = True
         self._lock = threading.Lock()
+        self._level = 0.0
+        self._recent_seconds = 0.6
+        self._recent_max_samples = int(self.sample_rate * self._recent_seconds)
+        self._recent: deque[Any] = deque()
+        self._recent_samples = 0
 
     @property
     def is_recording(self) -> bool:
@@ -125,6 +131,25 @@ class AudioRecorder:
     def is_paused(self) -> bool:
         """是否處於暫停狀態。"""
         return bool(self._paused)
+
+    @property
+    def level(self) -> float:
+        """最近一次音量強度（0.0 ~ 1.0）。"""
+        with self._lock:
+            return float(self._level)
+
+    def get_recent_samples(self, max_samples: int):
+        """取得最近錄音片段（用於即時波形顯示）。"""
+        import numpy as np
+
+        with self._lock:
+            if not self._recent:
+                return np.zeros((0,), dtype=np.float32)
+            samples = np.concatenate(list(self._recent), axis=0)
+
+        if max_samples > 0 and samples.size > max_samples:
+            samples = samples[-max_samples:]
+        return samples.astype(np.float32, copy=False)
 
     def start(self, device_id: int = -1) -> None:
         """開始錄音。
@@ -146,16 +171,41 @@ class AudioRecorder:
                 "Install it with: pip install sounddevice"
             ) from exc
 
+        import numpy as np
+
         def _callback(indata, _frames, _time, status):  # noqa: ANN001
             # status 可能包含 under/over run 等訊息；此處不強制拋出
             if self._paused:
                 return
+            try:
+                rms = float(np.sqrt(np.mean(np.square(indata))))
+            except Exception:
+                rms = 0.0
+            if rms < 0.0:
+                rms = 0.0
+            elif rms > 1.0:
+                rms = 1.0
+            if indata.ndim == 2:
+                mono = indata.mean(axis=1)
+            else:
+                mono = indata
             with self._lock:
                 # 一律 copy：避免 PortAudio buffer 後續被覆寫
                 self._chunks.append(indata.copy())
+                self._recent.append(mono.copy())
+                self._recent_samples += int(mono.shape[0])
+                while self._recent_samples > self._recent_max_samples and self._recent:
+                    removed = self._recent.popleft()
+                    self._recent_samples -= int(removed.shape[0])
+                # 簡單平滑，讓 UI 顯示更穩定
+                self._level = self._level * 0.65 + rms * 0.35
 
         self._chunks = []
         self._paused = False
+        with self._lock:
+            self._level = 0.0
+            self._recent.clear()
+            self._recent_samples = 0
 
         device = None if int(device_id) < 0 else int(device_id)
 
@@ -175,6 +225,8 @@ class AudioRecorder:
         if self._stream is None:
             return
         self._paused = True
+        with self._lock:
+            self._level = 0.0
 
     def resume(self) -> None:
         """繼續錄音。"""
@@ -205,10 +257,16 @@ class AudioRecorder:
         with self._lock:
             if not self._chunks:
                 self._chunks = []
+                self._level = 0.0
+                self._recent.clear()
+                self._recent_samples = 0
                 return np.zeros((0,), dtype=np.float32)
 
             audio = np.concatenate(self._chunks, axis=0)
             self._chunks = []
+            self._level = 0.0
+            self._recent.clear()
+            self._recent_samples = 0
 
         # 若 channels > 1，先做平均到 mono（避免送進 whisper 的形狀不一致）
         if audio.ndim == 2:
@@ -223,6 +281,9 @@ class AudioRecorder:
         finally:
             with self._lock:
                 self._chunks = []
+                self._level = 0.0
+                self._recent.clear()
+                self._recent_samples = 0
             self._paused = True
 
 if __name__ == "__main__":

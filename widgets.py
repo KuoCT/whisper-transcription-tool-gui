@@ -1,5 +1,6 @@
 import math
 import traceback
+from typing import Callable
 from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, QRectF, QSize
 from PySide6.QtGui import (
@@ -168,13 +169,17 @@ class WaveformBusyIndicator(QWidget):
 class MiniRecordIndicator(QWidget):
     """RecordArea 的迷你動畫：豎線（錄音中）/ 點點（閒置時）。
 
-    這個元件刻意做得「小而可控」：不追求寫實波形，只提供清楚的錄音狀態回饋。
+    這個元件使用真實波形的峰值來驅動高度，避免假動畫。
 
     你可以在 __init__ 這裡調整外觀參數：
     - bar_count：豎線數量（例如 15）
     - bar_width：單條豎線寬度
     - bar_gap：豎線間距（等間隔）
     - min_height_ratio / max_height_ratio：豎線高度範圍（相對於 widget 高度）
+    - idle_center_ratio：閒置點點的垂直位置（0~1）
+    - wave_gain：波形高度放大倍率
+    - wave_smoothing：波形平滑度（0~1，越大越平滑）
+    - wave_samples_per_bar：每根豎線取樣的樣本數
     """
 
     def __init__(
@@ -187,8 +192,13 @@ class MiniRecordIndicator(QWidget):
         min_height_ratio: float = 0.25,
         max_height_ratio: float = 1,
         idle_dot_radius: float = 2.2,
+        idle_center_ratio: float = 0.5,
         fps: int = 30,
         speed: float = 0.25,
+        wave_gain: float = 1.0,
+        wave_smoothing: float = 0.6,
+        wave_samples_per_bar: int = 48,
+        waveform_provider: Callable[[int], object] | None = None,
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
@@ -200,6 +210,11 @@ class MiniRecordIndicator(QWidget):
         self._active = False
         self._phase = 0.0
         self._speed = float(speed)
+        self._bar_levels: list[float] = []
+        self._wave_gain = float(wave_gain)
+        self._wave_smoothing = float(wave_smoothing)
+        self._wave_samples_per_bar = max(8, int(wave_samples_per_bar))
+        self._waveform_provider = waveform_provider
 
         # --- 外觀參數（可調整豎線數量 / 間距 / 高度）---
         self._bar_count = max(1, int(bar_count))
@@ -208,6 +223,7 @@ class MiniRecordIndicator(QWidget):
         self._min_height_ratio = float(min_height_ratio)
         self._max_height_ratio = float(max_height_ratio)
         self._idle_dot_radius = float(idle_dot_radius)
+        self._idle_center_ratio = float(idle_center_ratio)
 
         self._fps = max(1, int(fps))
         self._interval_ms = int(1000 / self._fps)
@@ -238,9 +254,49 @@ class MiniRecordIndicator(QWidget):
         else:
             if self._timer.isActive():
                 self._timer.stop()
+            self._bar_levels = [0.0] * self._bar_count
             self.update()
 
     def _tick(self) -> None:
+        if self._active and self._waveform_provider:
+            samples = None
+            try:
+                target_samples = max(128, self._bar_count * self._wave_samples_per_bar)
+                samples = self._waveform_provider(int(target_samples))
+            except Exception:
+                samples = None
+
+            levels = [0.0] * self._bar_count
+            if samples is not None:
+                try:
+                    import numpy as np
+
+                    wave = np.asarray(samples, dtype=np.float32).reshape(-1)
+                    if wave.size > 0:
+                        step = max(1, int(wave.size / self._bar_count))
+                        for i in range(self._bar_count):
+                            start = i * step
+                            if start >= wave.size:
+                                break
+                            end = wave.size if i == self._bar_count - 1 else min(wave.size, start + step)
+                            segment = wave[start:end]
+                            if segment.size <= 0:
+                                continue
+                            peak = float(np.max(np.abs(segment)))
+                            if peak < 0.0:
+                                peak = 0.0
+                            levels[i] = min(1.0, peak * self._wave_gain)
+                except Exception:
+                    pass
+
+            if not self._bar_levels or len(self._bar_levels) != self._bar_count:
+                self._bar_levels = [0.0] * self._bar_count
+
+            smoothing = min(0.95, max(0.0, self._wave_smoothing))
+            mix = 1.0 - smoothing
+            for i in range(self._bar_count):
+                self._bar_levels[i] = self._bar_levels[i] * smoothing + levels[i] * mix
+
         self._phase += self._speed
         if self._phase > 1_000_000:
             self._phase = 0.0
@@ -268,24 +324,21 @@ class MiniRecordIndicator(QWidget):
         if not self._active:
             # 閒置：豎線縮成點點（維持等間隔位置，不會跳動）
             radius = max(1.0, self._idle_dot_radius)
-            y = h * 0.65
+            idle_ratio = max(0.0, min(1.0, self._idle_center_ratio))
+            y = h * idle_ratio
             for i in range(count):
                 x = start_x + i * (bar_w + gap) + bar_w / 2.0
                 painter.drawEllipse(QRectF(x - radius, y - radius, radius * 2, radius * 2))
             return
 
-        # 錄音：豎線隨時間跳動（高度在 min/max 之間變化）
+        # 錄音：使用實際波形的峰值當作高度
         min_h = max(4.0, h * self._min_height_ratio)
         max_h = max(min_h, h * self._max_height_ratio)
         radius = min(bar_w / 2.0, 4.0)
 
         for i in range(count):
-            v1 = math.sin(self._phase + i * 0.55)
-            v2 = math.sin(self._phase * 1.25 + i * 0.21 + 1.2)
-            mixed = v1 * 0.65 + v2 * 0.35  # 範圍約 [-1, 1]
-            norm = (mixed + 1.0) / 2.0     # -> [0, 1]
-
-            bar_h = min_h + norm * (max_h - min_h)
+            level = self._bar_levels[i] if i < len(self._bar_levels) else 0.0
+            bar_h = min_h + level * (max_h - min_h)
             x = start_x + i * (bar_w + gap)
             y = (h - bar_h) / 2.0
             painter.drawRoundedRect(QRectF(x, y, bar_w, bar_h), radius, radius)
@@ -401,12 +454,16 @@ class RecordArea(PanelBase):
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.setSpacing(8)
 
-        # 中央：迷你動畫（錄音時跳動，閒置時為點點）
+        # 中央：迷你波形（錄音時顯示真實波形，閒置時為點點）
         #
-        # 想調整「豎線數量 / 間距 / 長度」：
-        # - bar_count：豎線數量（目前先設 15）
-        # - bar_width / bar_gap：粗細與間距（等間隔）
-        # - min_height_ratio / max_height_ratio：豎線高度範圍（越大看起來越「長」）
+        # 想調整「豎線外觀」與「波形反應」：
+        # - bar_count：豎線數量
+        # - bar_width / bar_gap：粗細與間距
+        # - min_height_ratio / max_height_ratio：豎線高度範圍
+        # - idle_center_ratio：閒置點點的垂直位置（0~1）
+        # - wave_gain：波形高度放大倍率
+        # - wave_smoothing：波形平滑度（0~1，越大越平滑）
+        # - wave_samples_per_bar：每根豎線取樣的樣本數
         self.indicator = MiniRecordIndicator(
             self._pal["accent"],
             bar_count=20,
@@ -414,6 +471,11 @@ class RecordArea(PanelBase):
             bar_gap=5,
             min_height_ratio=0.25,
             max_height_ratio=0.90,
+            idle_center_ratio=0.5,
+            wave_gain=15,
+            wave_smoothing=0.55,
+            wave_samples_per_bar=48,
+            waveform_provider=self._get_recent_wave_samples,
         )
 
         center_layout.addStretch(1)
@@ -530,6 +592,13 @@ class RecordArea(PanelBase):
         m = (total_seconds % 3600) // 60
         s = total_seconds % 60
         return f"{h:02d}:{m:02d}:{s:02d}"
+
+    def _get_recent_wave_samples(self, max_samples: int) -> object:
+        """回傳最近的錄音樣本（供波形繪製）。"""
+        try:
+            return self._recorder.get_recent_samples(max_samples)
+        except Exception:
+            return []
 
     def _tick_clock(self) -> None:
         self._elapsed_seconds += 1
