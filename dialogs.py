@@ -394,6 +394,20 @@ class SettingsDialog(QWidget):
         ttl_row.addWidget(self.ttl_combo)
         layout.addLayout(ttl_row)
 
+        # Auto Cache in RAM（可視情況保留 CPU 模型，加速喚醒）
+        cache_row = QHBoxLayout()
+        cache_row.setSpacing(12)
+        cache_label = QLabel("Auto Cache in RAM")
+        cache_label.setFixedWidth(140)
+
+        self.ck_model_cache = QCheckBox("Enable")
+        self.ck_model_cache.setChecked(bool(self.config.get("model_cache_in_ram", True)))
+
+        cache_row.addWidget(cache_label)
+        cache_row.addWidget(self.ck_model_cache)
+        cache_row.addStretch(1)
+        layout.addLayout(cache_row)
+
         # 分隔線（樣式由 QSS 統一控制）
         line = QLabel()
         line.setObjectName("separatorLine")
@@ -523,6 +537,7 @@ class SettingsDialog(QWidget):
 
         ttl_text = self.ttl_combo.currentText()
         self.config["model_ttl_seconds"] = -1 if ttl_text == "Never" else int(ttl_text)
+        self.config["model_cache_in_ram"] = bool(self.ck_model_cache.isChecked())
 
         # 輸出選項（至少選一個）
         self.config["output_popup"] = bool(self.ck_popup.isChecked())

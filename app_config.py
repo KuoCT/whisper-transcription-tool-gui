@@ -12,6 +12,7 @@ DEFAULT_CONFIG = {
     "theme": "light",  # "dark" or "light"
     "model_name": "turbo",  # tiny, base, small, medium, large, turbo
     "model_ttl_seconds": 180,  # 閒置多久後釋放模型 (秒)，-1 表示永不釋放
+    "model_cache_in_ram": True,  # Auto Cache in RAM（符合條件才啟用）
     "language_hint": "",  # 語言提示 (留白=自動偵測)
 
     # 錄音裝置（麥克風）

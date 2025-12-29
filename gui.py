@@ -61,6 +61,7 @@ class MainWindow(QWidget):
         self.model_manager = ModelManager(
             self.config.get("model_name", "turbo"),
             self.config.get("model_ttl_seconds", 180),
+            auto_cache_ram=self.config.get("model_cache_in_ram", True),
         )
 
         self._queue: list[Path] = []
@@ -233,6 +234,7 @@ class MainWindow(QWidget):
         self.model_manager.update_config(
             self.config.get("model_name", "turbo"),
             self.config.get("model_ttl_seconds", 180),
+            auto_cache_ram=self.config.get("model_cache_in_ram", True),
         )
 
         # 更新 Busy 指示器顏色
