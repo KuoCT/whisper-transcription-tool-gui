@@ -390,17 +390,18 @@ class MainWindow(QWidget):
 
         raw_text = payload.get("text", "") or ""
         segments = payload.get("segments") or []
-        formatted_text = format_transcript(raw_text, segments)
+        use_smart_format = bool(self.config.get("output_smart_format", True))
+        output_text = format_transcript(raw_text, segments) if use_smart_format else raw_text
 
         # 1) clipboard：直接寫入剪貼簿
         if self.config.get("output_clipboard", False):
-            QApplication.clipboard().setText(raw_text)
+            QApplication.clipboard().setText(output_text)
 
         # 2) pop-up：顯示可選取文字的子視窗
         if self.config.get("output_popup", False):
             dlg = TranscriptPopupDialog(
                 title=f"Transcription - {title_name}",
-                text=formatted_text,
+                text=output_text,
                 theme=self.config.get("theme", "dark"),
                 parent=self,
             )
@@ -412,7 +413,7 @@ class MainWindow(QWidget):
         # 3) 檔案輸出
         saved_paths: list[Path] = []
         if self.config.get("output_txt", True):
-            saved_paths.append(write_txt(self.output_dir, stem, formatted_text))
+            saved_paths.append(write_txt(self.output_dir, stem, output_text))
         if self.config.get("output_srt", True):
             saved_paths.append(write_srt(self.output_dir, stem, segments))
 

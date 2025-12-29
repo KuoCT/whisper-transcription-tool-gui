@@ -25,6 +25,7 @@ DEFAULT_CONFIG = {
     "output_clipboard": False,   # 直接複製到剪貼簿
     "output_txt": True,          # 輸出 .txt
     "output_srt": True,          # 輸出 .srt
+    "output_smart_format": True, # 智慧格式（換行/補標點）
 }
 
 

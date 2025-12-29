@@ -406,33 +406,36 @@ class SettingsDialog(QWidget):
         out_label = QLabel("Output")
         out_label.setFixedWidth(140)
 
-        out_hint = QLabel("Select at least one")
-        out_hint.setObjectName("hintLabel")
-
-        out_title_row.addWidget(out_label)
-        out_title_row.addWidget(out_hint)
-        out_title_row.addStretch(1)
-        layout.addLayout(out_title_row)
-
-        out_row = QHBoxLayout()
-        out_row.setSpacing(12)
-
         self.ck_popup = QCheckBox("Pop-up")
         self.ck_clipboard = QCheckBox("Clipboard")
         self.ck_txt = QCheckBox(".txt")
         self.ck_srt = QCheckBox(".srt")
+        self.ck_smart_format = QCheckBox("Smart Format")
 
         self.ck_popup.setChecked(bool(self.config.get("output_popup", False)))
         self.ck_clipboard.setChecked(bool(self.config.get("output_clipboard", False)))
         self.ck_txt.setChecked(bool(self.config.get("output_txt", True)))
         self.ck_srt.setChecked(bool(self.config.get("output_srt", True)))
+        self.ck_smart_format.setChecked(bool(self.config.get("output_smart_format", True)))
 
-        out_row.addStretch(1)
-        out_row.addWidget(self.ck_popup)
-        out_row.addWidget(self.ck_clipboard)
-        out_row.addWidget(self.ck_txt)
-        out_row.addWidget(self.ck_srt)
-        layout.addLayout(out_row)
+        out_title_row.addWidget(out_label)
+        out_title_row.addWidget(self.ck_popup)
+        out_title_row.addWidget(self.ck_clipboard)
+        out_title_row.addWidget(self.ck_txt)
+        out_title_row.addWidget(self.ck_srt)
+        out_title_row.addStretch(1)
+        layout.addLayout(out_title_row)
+
+        format_row = QHBoxLayout()
+        format_row.setSpacing(12)
+
+        format_label = QLabel("Formatting")
+        format_label.setFixedWidth(140)
+
+        format_row.addWidget(format_label)
+        format_row.addWidget(self.ck_smart_format)
+        format_row.addStretch(1)
+        layout.addLayout(format_row)
 
         # 分隔線
         line2 = QLabel()
@@ -526,6 +529,7 @@ class SettingsDialog(QWidget):
         self.config["output_clipboard"] = bool(self.ck_clipboard.isChecked())
         self.config["output_txt"] = bool(self.ck_txt.isChecked())
         self.config["output_srt"] = bool(self.ck_srt.isChecked())
+        self.config["output_smart_format"] = bool(self.ck_smart_format.isChecked())
 
         if not any([
             self.config["output_popup"],
