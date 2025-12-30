@@ -4,13 +4,14 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QDialog,
     QHBoxLayout,
     QLabel,
+    QProgressDialog,
     QPushButton,
     QStackedLayout,
     QTextEdit,
@@ -19,6 +20,13 @@ from PySide6.QtWidgets import (
     QMessageBox
 )
 from app_config import load_config, save_config
+from cuda_utils import (
+    cuda_runtime_available,
+    download_cuda_dlls,
+    get_cuda_dll_dir,
+    has_nvidia_gpu,
+    prepare_cuda_dlls,
+)
 from dialogs import SettingsDialog, TranscriptPopupDialog
 from model_manager import ModelManager
 from output_utils import format_transcript, write_srt, write_txt
@@ -29,6 +37,12 @@ from worker import TranscribeWorker
 
 WINDOW_WIDTH = 400
 WINDOW_HEIGHT = 180
+
+
+class _StartupSignals(QObject):
+    cuda_download_finished = Signal(bool, str)
+    cuda_progress = Signal(str, int, int)
+    update_available = Signal()
 
 
 class MainWindow(QWidget):
@@ -44,7 +58,20 @@ class MainWindow(QWidget):
 
         # 把模型快取移到專案資料夾
         base_dir = Path(__file__).resolve().parent
-        os.environ["XDG_CACHE_HOME"] = str(base_dir / "cache")
+        cache_dir = base_dir / "cache"
+        os.environ["XDG_CACHE_HOME"] = str(cache_dir)
+        os.environ.setdefault("HF_HOME", str(cache_dir / "hf"))
+        os.environ.setdefault("HF_HUB_CACHE", str(cache_dir / "hf" / "hub"))
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "0")
+
+        self._signals = _StartupSignals()
+        self._signals.cuda_download_finished.connect(self._finish_cuda_download)
+        self._signals.cuda_progress.connect(self._update_cuda_progress)
+        self._signals.update_available.connect(self._prompt_update_available)
+        self._cuda_dll_dir = get_cuda_dll_dir(base_dir)
+        self._cuda_progress = None
+
+        prepare_cuda_dlls(self._cuda_dll_dir)
 
         self._pal = get_palette(self.config.get("theme", "dark"))
 
@@ -59,9 +86,14 @@ class MainWindow(QWidget):
 
         # 初始化模型管理器
         self.model_manager = ModelManager(
-            self.config.get("model_name", "turbo"),
+            self.config.get("model_name", "distil-large-v3"),
             self.config.get("model_ttl_seconds", 180),
             auto_cache_ram=self.config.get("model_cache_in_ram", True),
+            device_preference=self.config.get("fw_device", "auto"),
+            compute_type=self.config.get("fw_compute_type", "auto"),
+            cpu_threads=int(self.config.get("fw_cpu_threads", 0)),
+            num_workers=int(self.config.get("fw_num_workers", 1)),
+            download_root=cache_dir / "whisper",
         )
 
         self._queue: list[Path] = []
@@ -156,6 +188,7 @@ class MainWindow(QWidget):
 
         self._apply_theme()
         self._show_idle_view()
+        self._schedule_startup_checks()
 
     # -------------------------------------------------------------------------
     # Theme / Mode
@@ -232,9 +265,13 @@ class MainWindow(QWidget):
 
         # 更新模型管理器設定
         self.model_manager.update_config(
-            self.config.get("model_name", "turbo"),
+            self.config.get("model_name", "distil-large-v3"),
             self.config.get("model_ttl_seconds", 180),
             auto_cache_ram=self.config.get("model_cache_in_ram", True),
+            device_preference=self.config.get("fw_device", "auto"),
+            compute_type=self.config.get("fw_compute_type", "auto"),
+            cpu_threads=int(self.config.get("fw_cpu_threads", 0)),
+            num_workers=int(self.config.get("fw_num_workers", 1)),
         )
 
         # 更新 Busy 指示器顏色
@@ -398,6 +435,7 @@ class MainWindow(QWidget):
             input_path=input_path,
             model_manager=self.model_manager,
             language_hint=self.config.get("language_hint", ""),
+            transcribe_options=self._build_transcribe_options(),
             display_name=input_path.name,
             output_stem=input_path.stem,
         )
@@ -426,6 +464,7 @@ class MainWindow(QWidget):
             audio=audio,
             model_manager=self.model_manager,
             language_hint=self.config.get("language_hint", ""),
+            transcribe_options=self._build_transcribe_options(),
             display_name="Recording",
             output_stem=stem,
         )
@@ -538,6 +577,197 @@ class MainWindow(QWidget):
             ttl = int(self.config.get("model_ttl_seconds", 180))
             if ttl >= 0:
                 self.model_manager.maybe_unload()
+
+    # -------------------------------------------------------------------------
+    # Startup checks (CUDA DLL / Updates)
+    # -------------------------------------------------------------------------
+
+    def _schedule_startup_checks(self) -> None:
+        QTimer.singleShot(600, self._maybe_prompt_cuda_dlls)
+        QTimer.singleShot(1200, self._start_update_check)
+
+    def _maybe_prompt_cuda_dlls(self) -> None:
+        if not self.config.get("cuda_check_enabled", True):
+            return
+        if sys.platform != "win32":
+            return
+
+        if cuda_runtime_available(self._cuda_dll_dir):
+            return
+        if not has_nvidia_gpu():
+            return
+
+        box = QMessageBox(self)
+        box.setWindowTitle("CUDA")
+        box.setIcon(QMessageBox.Question)
+        box.setText(
+            "NVIDIA GPU detected, but CUDA DLLs are missing.\n"
+            "Download CUDA 12 DLLs now?"
+        )
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+
+        dont_show = QCheckBox("Don't show again")
+        box.setCheckBox(dont_show)
+        choice = box.exec()
+
+        if dont_show.isChecked():
+            self.config["cuda_check_enabled"] = False
+            save_config(self.config)
+
+        if choice != QMessageBox.Yes:
+            return
+
+        self._download_cuda_dlls()
+
+    def _download_cuda_dlls(self) -> None:
+        self._show_cuda_progress()
+
+        def _run():
+            def _progress(label: str, downloaded: int, total: int) -> None:
+                self._signals.cuda_progress.emit(label, downloaded, total)
+
+            try:
+                download_cuda_dlls(self._cuda_dll_dir, progress_callback=_progress)
+                ok = True
+                err = ""
+            except Exception as exc:
+                ok = False
+                err = str(exc).strip() or exc.__class__.__name__
+
+            self._signals.cuda_download_finished.emit(ok, err)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _finish_cuda_download(self, success: bool, message: str) -> None:
+        if self._cuda_progress is not None:
+            self._cuda_progress.close()
+            self._cuda_progress = None
+        if success:
+            prepare_cuda_dlls(self._cuda_dll_dir)
+            self.model_manager.force_unload()
+            QMessageBox.information(self, "CUDA", "CUDA DLLs downloaded.")
+        else:
+            QMessageBox.warning(self, "CUDA", f"Failed to download CUDA DLLs.\n{message}")
+
+    def _show_cuda_progress(self) -> None:
+        if self._cuda_progress is not None:
+            self._cuda_progress.close()
+        dlg = QProgressDialog("Downloading CUDA DLLs...", "", 0, 100, self)
+        dlg.setWindowTitle("CUDA")
+        dlg.setWindowModality(Qt.ApplicationModal)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.setMinimumDuration(0)
+        dlg.setCancelButton(None)
+        dlg.setValue(0)
+        dlg.show()
+        self._cuda_progress = dlg
+
+    def _update_cuda_progress(self, label: str, downloaded: int, total: int) -> None:
+        if self._cuda_progress is None:
+            return
+
+        text = label or "Downloading CUDA DLLs..."
+        self._cuda_progress.setLabelText(text)
+
+        if total and total > 0:
+            if self._cuda_progress.maximum() != 100:
+                self._cuda_progress.setRange(0, 100)
+            percent = int((downloaded / total) * 100)
+            self._cuda_progress.setValue(max(0, min(100, percent)))
+        else:
+            if self._cuda_progress.maximum() != 0:
+                self._cuda_progress.setRange(0, 0)
+
+    def _start_update_check(self) -> None:
+        threading.Thread(target=self._check_for_updates, daemon=True).start()
+
+    def _check_for_updates(self) -> None:
+        base_dir = Path(__file__).resolve().parent
+        if not (base_dir / ".git").exists():
+            return
+
+        local_rev = self._run_git(["rev-parse", "HEAD"])
+        if not local_rev:
+            return
+
+        remote_rev = self._run_git(
+            ["ls-remote", "https://github.com/KuoCT/whisper-transcription-tool-gui", "HEAD"]
+        )
+        if not remote_rev:
+            return
+
+        remote_hash = remote_rev.split()[0].strip()
+        if remote_hash and remote_hash != local_rev:
+            self._signals.update_available.emit()
+
+    def _run_git(self, args: list[str]) -> str:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except Exception:
+            return ""
+
+        if result.returncode != 0:
+            return ""
+        return (result.stdout or "").strip()
+
+    def _prompt_update_available(self) -> None:
+        if self._busy:
+            return
+
+        choice = QMessageBox.question(
+            self,
+            "Update",
+            "New version available. Update now?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if choice != QMessageBox.Yes:
+            return
+
+        if self._launch_update_script():
+            self.close()
+
+    def _launch_update_script(self) -> bool:
+        base_dir = Path(__file__).resolve().parent
+        if sys.platform == "win32":
+            script = base_dir / "update-app.bat"
+            cmd = ["cmd", "/c", str(script)]
+        else:
+            script = base_dir / "update-app.sh"
+            cmd = ["bash", str(script)]
+
+        if not script.exists():
+            QMessageBox.warning(self, "Update", f"Update script not found: {script}")
+            return False
+
+        try:
+            subprocess.Popen(cmd, cwd=str(base_dir))
+            return True
+        except Exception as exc:
+            QMessageBox.warning(self, "Update", f"Failed to launch update script.\n{exc}")
+            return False
+
+    # -------------------------------------------------------------------------
+    # Transcribe options
+    # -------------------------------------------------------------------------
+
+    def _build_transcribe_options(self) -> dict:
+        options: dict = {}
+        try:
+            options["beam_size"] = max(1, int(self.config.get("fw_beam_size", 5)))
+        except Exception:
+            options["beam_size"] = 5
+        try:
+            options["batch_size"] = max(1, int(self.config.get("fw_batch_size", 8)))
+        except Exception:
+            options["batch_size"] = 8
+        options["vad_filter"] = bool(self.config.get("fw_vad_filter", False))
+        return options
 
     # -------------------------------------------------------------------------
     # Error dialog

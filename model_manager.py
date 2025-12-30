@@ -1,5 +1,27 @@
+import gc
 import threading
 import time
+from pathlib import Path
+
+from cuda_utils import (
+    cuda_runtime_available,
+    get_cuda_dll_dir,
+    get_max_vram_gb,
+    has_nvidia_gpu,
+    prepare_cuda_dlls,
+)
+
+
+# 估算模型最低 VRAM 需求（GB），供自動裝置選擇使用
+MODEL_VRAM_REQUIREMENTS_GB = {
+    "distil-large-v3": 5.0,
+    "large-v3": 10.0,
+}
+
+MODEL_REPO_IDS = {
+    "distil-large-v3": "Systran/faster-distil-whisper-large-v3",
+    "large-v3": "Systran/faster-whisper-large-v3",
+}
 
 
 class ModelManager:
@@ -17,156 +39,193 @@ class ModelManager:
         ttl_seconds: int = 60,
         *,
         auto_cache_ram: bool = True,
-        cache_ram_ratio: float = 1.5,
+        device_preference: str = "auto",
+        compute_type: str = "auto",
+        cpu_threads: int = 0,
+        num_workers: int = 1,
+        download_root: Path | None = None,
     ):
         self._model_name = model_name
-        self._ttl_seconds = ttl_seconds
+        self._ttl_seconds = int(ttl_seconds)
         self._auto_cache_ram = bool(auto_cache_ram)
-        self._cache_ram_ratio = float(cache_ram_ratio)
+        self._device_preference = (device_preference or "auto").strip().lower()
+        self._compute_type = (compute_type or "auto").strip().lower()
+        self._cpu_threads = max(0, int(cpu_threads))
+        self._num_workers = max(1, int(num_workers))
+
+        base_dir = Path(__file__).resolve().parent
+        self._download_root = Path(download_root) if download_root else (base_dir / "cache" / "whisper")
 
         self._lock = threading.Lock()
         self._model = None
-        self._model_size_bytes = 0
-        self._cached_cpu = False
+        self._model_device = ""
         self._active_jobs = 0
         self._last_used = 0.0
 
         self._loading = False
         self._loaded_event = threading.Event()
 
-    def update_config(self, model_name: str, ttl_seconds: int, *, auto_cache_ram: bool):
-        """更新模型配置（需要重新載入）"""
+    def update_config(
+        self,
+        model_name: str,
+        ttl_seconds: int,
+        *,
+        auto_cache_ram: bool,
+        device_preference: str,
+        compute_type: str,
+        cpu_threads: int,
+        num_workers: int,
+    ) -> None:
+        """更新模型配置（需要重新載入）。"""
         model_to_free = None
         with self._lock:
-            if self._model_name != model_name:
-                # 模型名稱改變，強制卸載舊模型
-                if self._model is not None:
-                    model_to_free = self._model
-                    self._model = None
-                    self._cached_cpu = False
-                    self._model_size_bytes = 0
-            self._model_name = model_name
-            self._ttl_seconds = ttl_seconds
-            self._auto_cache_ram = bool(auto_cache_ram)
+            updated = False
 
-            if (not self._auto_cache_ram) and self._cached_cpu and self._model is not None:
+            if self._model_name != model_name:
+                updated = True
+                self._model_name = model_name
+
+            ttl_seconds = int(ttl_seconds)
+            if self._ttl_seconds != ttl_seconds:
+                self._ttl_seconds = ttl_seconds
+
+            auto_cache_ram = bool(auto_cache_ram)
+            if self._auto_cache_ram != auto_cache_ram:
+                self._auto_cache_ram = auto_cache_ram
+
+            device_preference = (device_preference or "auto").strip().lower()
+            if self._device_preference != device_preference:
+                updated = True
+                self._device_preference = device_preference
+
+            compute_type = (compute_type or "auto").strip().lower()
+            if self._compute_type != compute_type:
+                updated = True
+                self._compute_type = compute_type
+
+            cpu_threads = max(0, int(cpu_threads))
+            if self._cpu_threads != cpu_threads:
+                updated = True
+                self._cpu_threads = cpu_threads
+
+            num_workers = max(1, int(num_workers))
+            if self._num_workers != num_workers:
+                updated = True
+                self._num_workers = num_workers
+
+            if updated and self._model is not None:
                 model_to_free = self._model
                 self._model = None
-                self._cached_cpu = False
-                self._model_size_bytes = 0
+                self._model_device = ""
 
         if model_to_free is not None:
             threading.Thread(
-                target=lambda: self._free_model(model_to_free), daemon=True
+                target=lambda: self._free_model(model_to_free),
+                daemon=True,
             ).start()
 
-    def _is_cuda_available(self) -> bool:
-        try:
-            import torch
-            return torch.cuda.is_available()
-        except Exception:
-            return False
+    def _resolve_device(self) -> str:
+        pref = self._device_preference
+        if pref not in {"auto", "cpu", "cuda"}:
+            pref = "auto"
 
-    def _preferred_device(self) -> str:
-        return "cuda" if self._is_cuda_available() else "cpu"
+        if pref == "cpu":
+            return "cpu"
 
-    def _estimate_model_bytes(self, model) -> int:
-        """估算模型佔用的權重大小（用於 RAM 快取判斷）。"""
-        total = 0
-        try:
-            for param in model.parameters():
-                total += param.numel() * param.element_size()
-            for buf in model.buffers():
-                total += buf.numel() * buf.element_size()
-        except Exception:
-            return 0
-        return int(total)
+        if self._can_use_cuda_for_model():
+            return "cuda"
 
-    def _can_cache_in_ram(self) -> bool:
-        if not self._auto_cache_ram:
-            return False
-        if not self._is_cuda_available():
-            return False
-        if self._model_size_bytes <= 0:
-            return False
-        try:
-            import psutil
-            available = int(psutil.virtual_memory().available)
-        except Exception:
-            return False
-        required = int(self._model_size_bytes * self._cache_ram_ratio)
-        return available >= required
+        return "cpu"
 
-    def _move_model_to_cpu(self, model) -> None:
+    def _resolve_compute_type(self, device: str) -> str:
+        compute = self._compute_type
+        if compute in {"", "auto", "default"}:
+            return "default"
+
+        if device == "cpu" and compute in {"float16", "int8_float16"}:
+            return "int8"
+
+        return compute
+
+    def _maybe_download_model(self) -> None:
+        repo_id = MODEL_REPO_IDS.get(self._model_name, "")
+        if not repo_id:
+            return
+
+        cache_dir = self._download_root / f"models--{repo_id.replace('/', '--')}"
+        if cache_dir.exists():
+            return
+
         try:
-            import torch
-            model.to("cpu")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            print(f"Downloading model: {repo_id}")
+            from huggingface_hub import snapshot_download
+
+            snapshot_download(
+                repo_id=repo_id,
+                cache_dir=str(self._download_root),
+                resume_download=True,
+            )
         except Exception:
+            # 下載失敗時交給 WhisperModel 自行處理（可能已部分下載）
             pass
 
-    def _move_model_to_cuda(self, model) -> bool:
-        try:
-            import torch
-            if not torch.cuda.is_available():
-                return False
-            model.to("cuda")
+    def _can_use_cuda_for_model(self) -> bool:
+        dll_dir = get_cuda_dll_dir()
+        if not has_nvidia_gpu():
+            return False
+        if not cuda_runtime_available(dll_dir):
+            return False
+
+        required = MODEL_VRAM_REQUIREMENTS_GB.get(self._model_name, 0.0)
+        if required <= 0:
             return True
-        except Exception:
-            return False
 
-    def _free_model(self, model):
-        """釋放模型資源"""
-        del model
+        vram_gb = get_max_vram_gb()
+        if vram_gb <= 0:
+            return True
+        return vram_gb >= required
+
+    def _free_model(self, model) -> None:
+        """釋放模型資源。"""
         try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
+            del model
+        finally:
+            gc.collect()
 
     def acquire(self):
-        """取得模型（如需要會延遲載入）"""
+        """取得模型（如需要會延遲載入）。"""
         need_load = False
-        need_promote = False
-        model_ref = None
 
         with self._lock:
             self._active_jobs += 1
             self._last_used = time.monotonic()
 
             if self._model is not None:
-                if self._cached_cpu:
-                    if not self._loading:
-                        self._loading = True
-                        self._loaded_event.clear()
-                        need_promote = True
-                        model_ref = self._model
-                else:
-                    return self._model
+                return self._model
 
-            if self._model is None and not self._loading:
+            if not self._loading:
                 self._loading = True
                 self._loaded_event.clear()
                 need_load = True
 
-        if need_promote and model_ref is not None:
-            promoted = self._move_model_to_cuda(model_ref)
-            with self._lock:
-                if self._model is model_ref:
-                    self._cached_cpu = not promoted
-                self._loading = False
-                self._last_used = time.monotonic()
-                self._loaded_event.set()
-                if self._model is not None:
-                    return self._model
-
         if need_load:
             try:
-                import whisper  # 本地 import：避免在 GUI 執行緒初始化 torch/whisper
-                model = whisper.load_model(self._model_name, device=self._preferred_device())
-                model_size = self._estimate_model_bytes(model)
+                device = self._resolve_device()
+                compute_type = self._resolve_compute_type(device)
+                prepare_cuda_dlls(get_cuda_dll_dir())
+
+                self._maybe_download_model()
+
+                from faster_whisper import WhisperModel  # 延遲 import，避免啟動時卡頓
+
+                model = WhisperModel(
+                    self._model_name,
+                    device=device,
+                    compute_type=compute_type,
+                    cpu_threads=self._cpu_threads,
+                    num_workers=self._num_workers,
+                    download_root=str(self._download_root),
+                )
             except Exception:
                 with self._lock:
                     self._loading = False
@@ -177,8 +236,7 @@ class ModelManager:
 
             with self._lock:
                 self._model = model
-                self._model_size_bytes = model_size
-                self._cached_cpu = False
+                self._model_device = device
                 self._loading = False
                 self._last_used = time.monotonic()
                 self._loaded_event.set()
@@ -186,48 +244,29 @@ class ModelManager:
 
         self._loaded_event.wait()
 
-        model_ref = None
         with self._lock:
             if self._model is None:
                 self._active_jobs = max(0, self._active_jobs - 1)
                 self._last_used = time.monotonic()
                 raise RuntimeError("Model loading failed or was cancelled.")
-            if self._cached_cpu and not self._loading:
-                self._loading = True
-                self._loaded_event.clear()
-                model_ref = self._model
-            else:
-                return self._model
+            return self._model
 
-        if model_ref is not None:
-            promoted = self._move_model_to_cuda(model_ref)
-            with self._lock:
-                if self._model is model_ref:
-                    self._cached_cpu = not promoted
-                self._loading = False
-                self._last_used = time.monotonic()
-                self._loaded_event.set()
-                if self._model is None:
-                    self._active_jobs = max(0, self._active_jobs - 1)
-                    self._last_used = time.monotonic()
-                    raise RuntimeError("Model loading failed or was cancelled.")
-                return self._model
-
-    def release(self):
-        """釋放模型使用權"""
+    def release(self) -> None:
+        """釋放模型使用權。"""
         with self._lock:
             self._active_jobs = max(0, self._active_jobs - 1)
             self._last_used = time.monotonic()
 
     def maybe_unload(self) -> bool:
-        """如果閒置超過 TTL 則卸載模型（非阻塞）"""
+        """如果閒置超過 TTL 則卸載模型（非阻塞）。"""
+        if self._auto_cache_ram and self._model_device == "cpu":
+            return False
+
         acquired = self._lock.acquire(blocking=False)
         if not acquired:
             return False
 
         model_to_free = None
-        model_to_cpu = None
-        should_demote = False
         try:
             if self._model is None:
                 return False
@@ -238,35 +277,11 @@ class ModelManager:
 
             idle_seconds = time.monotonic() - self._last_used
             if self._active_jobs == 0 and idle_seconds >= self._ttl_seconds:
-                if self._cached_cpu:
-                    if not self._can_cache_in_ram():
-                        model_to_free = self._model
-                        self._model = None
-                        self._cached_cpu = False
-                        self._model_size_bytes = 0
-                else:
-                    if self._can_cache_in_ram():
-                        if not self._loading:
-                            self._loading = True
-                            self._loaded_event.clear()
-                            self._cached_cpu = True
-                            model_to_cpu = self._model
-                            should_demote = True
-                    else:
-                        model_to_free = self._model
-                        self._model = None
-                        self._cached_cpu = False
-                        self._model_size_bytes = 0
+                model_to_free = self._model
+                self._model = None
+                self._model_device = ""
         finally:
             self._lock.release()
-
-        if should_demote and model_to_cpu is not None:
-            threading.Thread(
-                target=self._finish_demote_to_cpu,
-                args=(model_to_cpu,),
-                daemon=True,
-            ).start()
-            return True
 
         if model_to_free is not None:
             self._free_model(model_to_free)
@@ -274,22 +289,14 @@ class ModelManager:
 
         return False
 
-    def _finish_demote_to_cpu(self, model) -> None:
-        """在背景執行 CPU demote，避免阻塞 GUI。"""
-        self._move_model_to_cpu(model)
-        with self._lock:
-            self._loading = False
-            self._loaded_event.set()
-
     def force_unload(self) -> bool:
-        """強制卸載模型"""
+        """強制卸載模型。"""
         with self._lock:
             if self._model is None:
                 return False
             model_to_free = self._model
             self._model = None
-            self._cached_cpu = False
-            self._model_size_bytes = 0
+            self._model_device = ""
 
         self._free_model(model_to_free)
         return True

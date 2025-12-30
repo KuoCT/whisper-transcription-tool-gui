@@ -1,5 +1,6 @@
 from __future__ import annotations
 from PySide6.QtCore import Qt, Signal, QEvent
+from PySide6.QtGui import QIntValidator
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -23,7 +24,9 @@ from style import (
 )
 
 
-AVAILABLE_MODELS = ["tiny", "base", "small", "medium", "large", "turbo"]
+AVAILABLE_MODELS = ["distil-large-v3", "large-v3"]
+DEVICE_CHOICES = ["auto", "cuda", "cpu"]
+COMPUTE_CHOICES = ["auto", "float16", "int8_float16", "int8", "float32"]
 
 
 class TranscriptPopupDialog(QDialog):
@@ -283,10 +286,13 @@ class SettingsDialog(QWidget):
         norm = " ".join(raw.lower().replace("_", " ").replace("-", " ").split())
 
         try:
-            # 本地 import：避免在沒有 whisper 時造成啟動失敗
-            from whisper.tokenizer import LANGUAGES
+            # 本地 import：避免在沒有 faster-whisper 時造成啟動失敗
+            from faster_whisper.tokenizer import LANGUAGES
         except Exception:
-            return ""
+            try:
+                from whisper.tokenizer import LANGUAGES
+            except Exception:
+                return ""
 
         # 直接匹配代碼（例如 en / zh）
         if norm in LANGUAGES:
@@ -408,6 +414,107 @@ class SettingsDialog(QWidget):
         cache_row.addStretch(1)
         layout.addLayout(cache_row)
 
+        # 分隔線
+        line_adv = QLabel()
+        line_adv.setObjectName("separatorLine")
+        line_adv.setFixedHeight(1)
+        layout.addWidget(line_adv)
+
+        # Advanced settings（按鈕展開）
+        adv_row = QHBoxLayout()
+        adv_row.setSpacing(12)
+        adv_label = QLabel("Advanced")
+        adv_label.setFixedWidth(140)
+        self.adv_toggle = QPushButton("Show")
+        self.adv_toggle.setCheckable(True)
+        self.adv_toggle.toggled.connect(self._toggle_advanced)
+        adv_row.addWidget(adv_label)
+        adv_row.addWidget(self.adv_toggle)
+        adv_row.addStretch(1)
+        layout.addLayout(adv_row)
+
+        self.adv_container = QWidget()
+        adv_layout = QVBoxLayout(self.adv_container)
+        adv_layout.setContentsMargins(0, 0, 0, 0)
+        adv_layout.setSpacing(8)
+        self.adv_container.setVisible(False)
+
+        # Device
+        device_row = QHBoxLayout()
+        device_row.setSpacing(12)
+        device_label = QLabel("Device")
+        device_label.setFixedWidth(140)
+        self.device_combo = self._create_combo(
+            DEVICE_CHOICES,
+            self.config.get("fw_device", "auto"),
+        )
+        device_row.addWidget(device_label)
+        device_row.addWidget(self.device_combo)
+        adv_layout.addLayout(device_row)
+
+        # Compute Type
+        compute_row = QHBoxLayout()
+        compute_row.setSpacing(12)
+        compute_label = QLabel("Compute Type")
+        compute_label.setFixedWidth(140)
+        self.compute_combo = self._create_combo(
+            COMPUTE_CHOICES,
+            self.config.get("fw_compute_type", "auto"),
+        )
+        compute_row.addWidget(compute_label)
+        compute_row.addWidget(self.compute_combo)
+        adv_layout.addLayout(compute_row)
+
+        # Batch Size
+        batch_row = QHBoxLayout()
+        batch_row.setSpacing(12)
+        batch_label = QLabel("Batch Size")
+        batch_label.setFixedWidth(140)
+        self.batch_input = QLineEdit()
+        self.batch_input.setValidator(QIntValidator(1, 256))
+        self.batch_input.setText(str(self.config.get("fw_batch_size", 8)))
+        batch_row.addWidget(batch_label)
+        batch_row.addWidget(self.batch_input)
+        adv_layout.addLayout(batch_row)
+
+        # Beam Size
+        beam_row = QHBoxLayout()
+        beam_row.setSpacing(12)
+        beam_label = QLabel("Beam Size")
+        beam_label.setFixedWidth(140)
+        self.beam_input = QLineEdit()
+        self.beam_input.setValidator(QIntValidator(1, 10))
+        self.beam_input.setText(str(self.config.get("fw_beam_size", 5)))
+        beam_row.addWidget(beam_label)
+        beam_row.addWidget(self.beam_input)
+        adv_layout.addLayout(beam_row)
+
+        # VAD Filter
+        vad_row = QHBoxLayout()
+        vad_row.setSpacing(12)
+        vad_label = QLabel("VAD Filter")
+        vad_label.setFixedWidth(140)
+        self.ck_vad_filter = QCheckBox("Enable")
+        self.ck_vad_filter.setChecked(bool(self.config.get("fw_vad_filter", False)))
+        vad_row.addWidget(vad_label)
+        vad_row.addWidget(self.ck_vad_filter)
+        vad_row.addStretch(1)
+        adv_layout.addLayout(vad_row)
+
+        # CUDA 檢查
+        cuda_row = QHBoxLayout()
+        cuda_row.setSpacing(12)
+        cuda_label = QLabel("Check CUDA on Start")
+        cuda_label.setFixedWidth(140)
+        self.ck_cuda_check = QCheckBox("Enable")
+        self.ck_cuda_check.setChecked(bool(self.config.get("cuda_check_enabled", True)))
+        cuda_row.addWidget(cuda_label)
+        cuda_row.addWidget(self.ck_cuda_check)
+        cuda_row.addStretch(1)
+        adv_layout.addLayout(cuda_row)
+
+        layout.addWidget(self.adv_container)
+
         # 分隔線（樣式由 QSS 統一控制）
         line = QLabel()
         line.setObjectName("separatorLine")
@@ -497,6 +604,15 @@ class SettingsDialog(QWidget):
         layout.addLayout(button_layout)
         self.setLayout(layout)
 
+    def _toggle_advanced(self, checked: bool) -> None:
+        """展開/收合進階設定區塊。"""
+        checked = bool(checked)
+        if hasattr(self, "adv_container"):
+            self.adv_container.setVisible(checked)
+        if hasattr(self, "adv_toggle"):
+            self.adv_toggle.setText("Hide" if checked else "Show")
+        self.adjustSize()
+
     def _create_combo(self, items, current):
         """創建下拉選單"""
         combo = QComboBox()
@@ -538,6 +654,17 @@ class SettingsDialog(QWidget):
         ttl_text = self.ttl_combo.currentText()
         self.config["model_ttl_seconds"] = -1 if ttl_text == "Never" else int(ttl_text)
         self.config["model_cache_in_ram"] = bool(self.ck_model_cache.isChecked())
+        self.config["fw_device"] = self.device_combo.currentText()
+        self.config["fw_compute_type"] = self.compute_combo.currentText()
+
+        batch_text = (self.batch_input.text() or "").strip()
+        self.config["fw_batch_size"] = int(batch_text) if batch_text.isdigit() else 8
+
+        beam_text = (self.beam_input.text() or "").strip()
+        self.config["fw_beam_size"] = int(beam_text) if beam_text.isdigit() else 5
+
+        self.config["fw_vad_filter"] = bool(self.ck_vad_filter.isChecked())
+        self.config["cuda_check_enabled"] = bool(self.ck_cuda_check.isChecked())
 
         # 輸出選項（至少選一個）
         self.config["output_popup"] = bool(self.ck_popup.isChecked())

@@ -10,14 +10,22 @@ CONFIG_FILE = BASE_DIR / "AppConfig.json"
 # 默認配置
 DEFAULT_CONFIG = {
     "theme": "light",  # "dark" or "light"
-    "model_name": "turbo",  # tiny, base, small, medium, large, turbo
+    "model_name": "distil-large-v3",  # distil-large-v3, large-v3
     "model_ttl_seconds": 180,  # 閒置多久後釋放模型 (秒)，-1 表示永不釋放
-    "model_cache_in_ram": True,  # Auto Cache in RAM（符合條件才啟用）
+    "model_cache_in_ram": True,  # Auto Cache in RAM（CPU 閒置時保留）
     "language_hint": "",  # 語言提示 (留白=自動偵測)
 
     # 錄音裝置（麥克風）
     # -1 = System Default；其他值為 sounddevice 的 device index
     "input_device": -1,
+
+    # faster-whisper 進階設定
+    "fw_device": "auto",       # auto / cuda / cpu
+    "fw_compute_type": "auto", # auto / float16 / int8_float16 / int8 / float32
+    "fw_batch_size": 8,
+    "fw_beam_size": 5,
+    "fw_vad_filter": False,
+    "cuda_check_enabled": True,
 
     "output_dir": str(BASE_DIR / "output"),
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
+import inspect
+import sys
 import traceback
 from pathlib import Path
 from PySide6.QtCore import QObject, Signal
 
 
 class TranscribeWorker(QObject):
-    """背景工作執行緒的工作器（不落地音訊 → whisper）。
+    """背景工作執行緒的工作器（不落地音訊 → faster-whisper）。
 
     支援兩種輸入來源：
     1) input_path：從檔案抽取音訊（audio_extract.py）
@@ -23,6 +25,7 @@ class TranscribeWorker(QObject):
         audio=None,
         model_manager=None,
         language_hint: str = "",
+        transcribe_options: dict | None = None,
         display_name: str | None = None,
         output_stem: str | None = None,
     ):
@@ -31,6 +34,7 @@ class TranscribeWorker(QObject):
         self.audio = audio
         self.model_manager = model_manager
         self.language_hint = (language_hint or "").strip()
+        self.transcribe_options = dict(transcribe_options or {})
         self.display_name = (display_name or "").strip() or None
         self.output_stem = (output_stem or "").strip() or None
 
@@ -58,17 +62,69 @@ class TranscribeWorker(QObject):
             try:
                 transcribe_kwargs = {
                     "task": "transcribe",
-                    "verbose": False,
                 }
                 if self.language_hint:
                     transcribe_kwargs["language"] = self.language_hint
+                if self.transcribe_options:
+                    transcribe_kwargs.update(self.transcribe_options)
 
-                result = model.transcribe(
+                # 避免不同 faster-whisper 版本的參數不一致
+                try:
+                    allowed = set(inspect.signature(model.transcribe).parameters)
+                    transcribe_kwargs = {
+                        key: value
+                        for key, value in transcribe_kwargs.items()
+                        if key in allowed
+                    }
+                except Exception:
+                    pass
+
+                segments_iter, _ = model.transcribe(
                     audio,
                     **transcribe_kwargs,
                 )
             finally:
                 self.model_manager.release()
+
+            segments = []
+            text_parts = []
+            total_seconds = 0.0
+            try:
+                total_seconds = float(len(audio)) / 16000.0
+            except Exception:
+                total_seconds = 0.0
+
+            next_threshold = 0
+            progress_active = total_seconds > 0
+            for seg in segments_iter:
+                seg_text = (getattr(seg, "text", "") or "").strip()
+                segments.append(
+                    {
+                        "start": float(getattr(seg, "start", 0.0)),
+                        "end": float(getattr(seg, "end", 0.0)),
+                        "text": seg_text,
+                    }
+                )
+                text_parts.append(getattr(seg, "text", "") or "")
+
+                if progress_active:
+                    try:
+                        end_sec = float(getattr(seg, "end", 0.0))
+                    except Exception:
+                        end_sec = 0.0
+                    if total_seconds > 0:
+                        percent = int(min(100, (end_sec / total_seconds) * 100))
+                        if percent >= next_threshold:
+                            self.progress.emit(f"Transcribing... {percent}%")
+                            _print_progress(percent)
+                            next_threshold = min(100, (int(percent / 5) + 1) * 5)
+
+            if progress_active:
+                _print_progress(100)
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+
+            full_text = "".join(text_parts).strip()
 
             input_path_str = str(self.input_path) if self.input_path else ""
             display_name = self.display_name
@@ -83,8 +139,8 @@ class TranscribeWorker(QObject):
                 "input_path": input_path_str,
                 "display_name": display_name,
                 "output_stem": output_stem,
-                "text": (result.get("text") or ""),
-                "segments": result.get("segments") or [],
+                "text": full_text,
+                "segments": segments,
             }
             self.finished.emit(payload)
         except Exception as exc:
@@ -92,3 +148,15 @@ class TranscribeWorker(QObject):
             message = str(exc).strip() or exc.__class__.__name__
             tb = traceback.format_exc().strip()
             self.error.emit(message, tb)
+
+
+def _print_progress(percent: int, *, width: int = 24) -> None:
+    """在終端輸出簡易進度條。"""
+    try:
+        pct = max(0, min(100, int(percent)))
+        filled = int(width * (pct / 100))
+        bar = "#" * filled + "-" * (width - filled)
+        sys.stdout.write(f"\rTranscribing [{bar}] {pct:3d}%")
+        sys.stdout.flush()
+    except Exception:
+        pass
