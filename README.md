@@ -55,6 +55,9 @@ uv sync
 ```
 
 ## Usage
+Windows: `whisper-transcription-tool-gui.bat`  
+macOS/Linux: `bash whisper-transcription-tool-gui.sh`
+
 ```bash
 uv run python gui.py
 ```

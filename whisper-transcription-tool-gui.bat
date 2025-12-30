@@ -1,2 +1,5 @@
 @echo off
-uv run python gui.py
+setlocal
+cd /d "%~dp0"
+call install-uv.bat
+call run-app.bat
