@@ -423,6 +423,13 @@ def _build_checkbox_qss_from_palette(pal: dict[str, str], *, disabled_bg: str) -
     )
 
 
+def build_checkbox_stylesheet(pal: dict[str, str], *, disabled_bg: str | None = None) -> str:
+    """è¼¸å‡ºå?¨ç”¨ CheckBox QSSï¼Œä¾›å°å°è©±æ¡†é‡?ç”¨ã€?"""
+    if disabled_bg is None:
+        disabled_bg = pal["button_hover"]
+    return _build_checkbox_qss_from_palette(pal, disabled_bg=disabled_bg)
+
+
 def build_error_dialog_stylesheet(pal: dict[str, str]) -> str:
     """Error dialog（可 resize 的 QDialog）樣式。
 

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QProgressDialog,
+    QProgressBar,
     QPushButton,
     QTextEdit,
     QVBoxLayout,
@@ -46,12 +47,9 @@ class ModelDownloadWorker(QObject):
 
     def run(self) -> None:
         try:
-            from faster_whisper.utils import download_model
+            from model_manager import download_model_snapshot
 
-            download_model(
-                self.model_id,
-                cache_dir=str(self.cache_dir),
-            )
+            download_model_snapshot(self.model_id, self.cache_dir)
             self.finished.emit(self.model_id)
         except Exception as exc:
             message = str(exc).strip() or exc.__class__.__name__
@@ -294,7 +292,8 @@ class SettingsDialog(QWidget):
         self.config = {**DEFAULT_CONFIG, **(config or {})}
         self._model_cache_dir = Path(__file__).resolve().parent / "cache" / "whisper"
         self._download_busy = False
-        self._custom_models: list[str] = []
+        raw_custom_models = [m for m in (self.config.get("custom_models") or []) if m]
+        self._custom_models = self._filter_cached_custom_models(raw_custom_models)
         self.setWindowTitle("Settings")
 
         # 設置為獨立視窗（彈出對話框）
@@ -313,6 +312,14 @@ class SettingsDialog(QWidget):
         """匹配語言提示(e.g. en/english)"""
         codes = parse_language_hint(user_input)
         return format_language_hint(codes)
+
+    def _filter_cached_custom_models(self, model_ids: list[str]) -> list[str]:
+        """開啟設定時同步清理已被刪除的自訂模型。"""
+        filtered: list[str] = []
+        for model_id in model_ids:
+            if self._is_model_cached(model_id):
+                filtered.append(model_id)
+        return filtered
 
     def _build_ui(self) -> None:
         """構建 UI"""
@@ -336,9 +343,10 @@ class SettingsDialog(QWidget):
         model_label = QLabel("Model")
         model_label.setFixedWidth(140)
         current_model = (self.config.get("model_name") or "").strip()
-        custom_models = [m for m in (self.config.get("custom_models") or []) if m]
+        custom_models = list(self._custom_models)
         if current_model and current_model not in AVAILABLE_MODELS and current_model not in custom_models:
-            custom_models.append(current_model)
+            if self._is_model_cached(current_model):
+                custom_models.append(current_model)
         self._custom_models = custom_models
         model_items = AVAILABLE_MODELS + [m for m in custom_models if m not in AVAILABLE_MODELS]
         base_model = current_model if current_model in model_items else (model_items[0] if model_items else "")
@@ -647,6 +655,7 @@ class SettingsDialog(QWidget):
 
         layout.addLayout(button_layout)
         self.setLayout(layout)
+        self._sync_download_button_size()
 
     def _resolve_download_model_id(self, model_id: str) -> str:
         """整理模型 ID（去除空白）。"""
@@ -706,6 +715,17 @@ class SettingsDialog(QWidget):
             self._add_custom_model(model_id)
         self.custom_download_btn.setEnabled(bool(model_id) and not cached)
 
+    @staticmethod
+    def _tune_busy_progress_dialog(progress: QProgressDialog) -> None:
+        """調整忙碌進度條的置中與顯示。"""
+        bar = progress.findChild(QProgressBar)
+        if bar is None:
+            return
+        bar.setTextVisible(False)
+        layout = progress.layout()
+        if layout is not None:
+            layout.setAlignment(bar, Qt.AlignHCenter)
+
     def _start_model_download(self, model_id: str, *, is_custom: bool) -> None:
         """啟動模型下載流程。"""
         model_id = self._resolve_download_model_id(model_id)
@@ -728,6 +748,7 @@ class SettingsDialog(QWidget):
         progress.setWindowModality(Qt.ApplicationModal)
         progress.setCancelButton(None)
         progress.show()
+        self._tune_busy_progress_dialog(progress)
 
         self._download_worker = ModelDownloadWorker(model_id, self._model_cache_dir)
 
@@ -780,6 +801,21 @@ class SettingsDialog(QWidget):
         if hasattr(self, "adv_toggle"):
             self.adv_toggle.setText("Hide" if checked else "Show")
         self.adjustSize()
+
+    def _sync_download_button_size(self) -> None:
+        """同步兩個下載按鈕尺寸，避免顯示不一致。"""
+        if not hasattr(self, "model_download_btn") or not hasattr(self, "custom_download_btn"):
+            return
+        model_hint = self.model_download_btn.sizeHint()
+        custom_hint = self.custom_download_btn.sizeHint()
+        target_w = max(model_hint.width(), custom_hint.width())
+        target_h = max(model_hint.height(), custom_hint.height())
+        if target_w <= 0:
+            target_w = 92
+        if target_h <= 0:
+            target_h = 28
+        self.model_download_btn.setFixedSize(target_w, target_h)
+        self.custom_download_btn.setFixedSize(target_w, target_h)
 
     def _create_combo(self, items, current):
         """創建下拉選單"""

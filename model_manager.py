@@ -1,4 +1,5 @@
 import gc
+import sys
 import threading
 import time
 from pathlib import Path
@@ -22,6 +23,81 @@ MODEL_REPO_IDS = {
     "large-v3-turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
     "turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
 }
+
+
+def resolve_model_repo_id(model_id: str) -> str:
+    model_id = (model_id or "").strip()
+    if not model_id:
+        return ""
+    try:
+        if Path(model_id).exists():
+            return ""
+    except Exception:
+        pass
+    return MODEL_REPO_IDS.get(model_id, model_id)
+
+
+def download_model_snapshot(model_id: str, cache_root: Path) -> None:
+    repo_id = resolve_model_repo_id(model_id)
+    if not repo_id:
+        return
+
+    cache_dir = cache_root / f"models--{repo_id.replace('/', '--')}"
+    if cache_dir.exists():
+        return
+
+    print(f"Downloading model: {repo_id}")
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(
+        repo_id=repo_id,
+        cache_dir=str(cache_root),
+    )
+
+
+def _print_preload_progress(stop_event: threading.Event, label: str, *, width: int = 24) -> None:
+    """在終端顯示模型預載進度條（不顯示百分比）。"""
+    pos = 0
+    direction = 1
+    try:
+        while not stop_event.is_set():
+            bar = ["-"] * width
+            bar[pos] = "#"
+            sys.stdout.write(f"\r{label} [{''.join(bar)}]")
+            sys.stdout.flush()
+            pos += direction
+            if pos >= width - 1 or pos <= 0:
+                direction *= -1
+            stop_event.wait(0.08)
+    except Exception:
+        pass
+
+
+def _start_preload_progress(label: str) -> tuple[threading.Event, threading.Thread]:
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_print_preload_progress,
+        args=(stop_event, label),
+        daemon=True,
+    )
+    thread.start()
+    return stop_event, thread
+
+
+def _stop_preload_progress(
+    stop_event: threading.Event | None,
+    thread: threading.Thread | None,
+) -> None:
+    if stop_event is None:
+        return
+    stop_event.set()
+    if thread is not None:
+        thread.join(timeout=0.5)
+    try:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+    except Exception:
+        pass
 
 
 class ModelManager:
@@ -148,23 +224,8 @@ class ModelManager:
         return compute
 
     def _maybe_download_model(self) -> None:
-        repo_id = MODEL_REPO_IDS.get(self._model_name, "")
-        if not repo_id:
-            return
-
-        cache_dir = self._download_root / f"models--{repo_id.replace('/', '--')}"
-        if cache_dir.exists():
-            return
-
         try:
-            print(f"Downloading model: {repo_id}")
-            from huggingface_hub import snapshot_download
-
-            snapshot_download(
-                repo_id=repo_id,
-                cache_dir=str(self._download_root),
-                resume_download=True,
-            )
+            download_model_snapshot(self._model_name, self._download_root)
         except Exception:
             # 下載失敗交給 WhisperModel 自行處理
             pass
@@ -191,17 +252,21 @@ class ModelManager:
             prepare_cuda_dlls(get_cuda_dll_dir())
 
         self._maybe_download_model()
+        # ??????????????
+        progress_stop, progress_thread = _start_preload_progress("Preloading model")
+        try:
+            from faster_whisper import WhisperModel
 
-        from whisper_hinted import HintedWhisperModel  # 延遲 import，避免啟動時載入過慢
-
-        return HintedWhisperModel(
-            self._model_name,
-            device=device,
-            compute_type=compute_type,
-            cpu_threads=self._cpu_threads,
-            num_workers=self._num_workers,
-            download_root=str(self._download_root),
-        )
+            return WhisperModel(
+                self._model_name,
+                device=device,
+                compute_type=compute_type,
+                cpu_threads=self._cpu_threads,
+                num_workers=self._num_workers,
+                download_root=str(self._download_root),
+            )
+        finally:
+            _stop_preload_progress(progress_stop, progress_thread)
 
     def acquire(self):
         """取得模型（如需要會延遲載入）。"""

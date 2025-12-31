@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QProgressDialog,
+    QProgressBar,
     QPushButton,
     QStackedLayout,
     QTextEdit,
@@ -30,7 +31,7 @@ from cuda_utils import (
 from dialogs import SettingsDialog, TranscriptPopupDialog
 from model_manager import ModelManager
 from output_utils import format_transcript, write_srt, write_txt
-from style import build_error_dialog_stylesheet, build_stylesheet, get_palette
+from style import build_checkbox_stylesheet, build_error_dialog_stylesheet, build_stylesheet, get_palette
 from widgets import BusyArea, DropArea, RecordArea, WaveformBusyIndicator
 from worker import TranscribeWorker
 
@@ -607,6 +608,8 @@ class MainWindow(QWidget):
         box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
 
         dont_show = QCheckBox("Don't show again")
+        # CUDA 提示框的 checkbox 樣式與 Settings 一致
+        dont_show.setStyleSheet(build_checkbox_stylesheet(self._pal))
         box.setCheckBox(dont_show)
         choice = box.exec()
 
@@ -649,18 +652,40 @@ class MainWindow(QWidget):
         else:
             QMessageBox.warning(self, "CUDA", f"Failed to download CUDA DLLs.\n{message}")
 
+    @staticmethod
+    def _tune_busy_progress_dialog(progress: QProgressDialog) -> None:
+        """Center a busy progress bar and hide its percent text."""
+        bar = progress.findChild(QProgressBar)
+        if bar is None:
+            return
+        bar.setTextVisible(False)
+        layout = progress.layout()
+        if layout is not None:
+            layout.setAlignment(bar, Qt.AlignHCenter)
+
+    @staticmethod
+    def _tune_determinate_progress_dialog(progress: QProgressDialog) -> None:
+        """Center determinate progress bars and hide percent text."""
+        bar = progress.findChild(QProgressBar)
+        if bar is None:
+            return
+        bar.setTextVisible(False)
+        layout = progress.layout()
+        if layout is not None:
+            layout.setAlignment(bar, Qt.AlignHCenter)
+
     def _show_cuda_progress(self) -> None:
         if self._cuda_progress is not None:
             self._cuda_progress.close()
-        dlg = QProgressDialog("Downloading CUDA DLLs...", "", 0, 100, self)
+        dlg = QProgressDialog("Downloading CUDA DLLs...", "", 0, 0, self)
         dlg.setWindowTitle("CUDA")
         dlg.setWindowModality(Qt.ApplicationModal)
         dlg.setAutoClose(False)
         dlg.setAutoReset(False)
         dlg.setMinimumDuration(0)
         dlg.setCancelButton(None)
-        dlg.setValue(0)
         dlg.show()
+        self._tune_busy_progress_dialog(dlg)
         self._cuda_progress = dlg
 
     def _update_cuda_progress(self, label: str, downloaded: int, total: int) -> None:
@@ -673,11 +698,16 @@ class MainWindow(QWidget):
         if total and total > 0:
             if self._cuda_progress.maximum() != 100:
                 self._cuda_progress.setRange(0, 100)
+                self._tune_determinate_progress_dialog(self._cuda_progress)
             percent = int((downloaded / total) * 100)
-            self._cuda_progress.setValue(max(0, min(100, percent)))
+            percent = max(0, min(100, percent))
+            self._cuda_progress.setValue(percent)
+            self._cuda_progress.setWindowTitle(f"CUDA ({percent}%)")
         else:
             if self._cuda_progress.maximum() != 0:
                 self._cuda_progress.setRange(0, 0)
+                self._tune_busy_progress_dialog(self._cuda_progress)
+            self._cuda_progress.setWindowTitle("CUDA")
 
     def _start_update_check(self) -> None:
         threading.Thread(target=self._check_for_updates, daemon=True).start()
