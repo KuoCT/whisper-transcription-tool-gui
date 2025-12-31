@@ -1,66 +1,51 @@
 """
 audio_extract.py
-功能說明：
-- 統一抽取/轉換音訊（支援輸出成檔案或純記憶體）
-- 需求：系統需已安裝 ffmpeg，並加入 PATH
+功能說明:
+- 統一抽取/轉換音訊（支援輸出檔案或記憶體）
+- 使用 PyAV（bundled FFmpeg）避免系統額外安裝
 
-備註：
-- 若你要接 Whisper，建議使用 extract_audio_array()（不落地檔案），回傳 float32 waveform。
+備註:
+- 若要接 Whisper，建議使用 extract_audio_array()（不落地檔案），回傳 float32 waveform
 """
 
 from __future__ import annotations
-import os
-import shutil
-import subprocess
+import gc
+import io
+import itertools
+import threading
+import wave
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Optional, Set
 
+try:
+    import av
+except Exception:  # pragma: no cover - 缺少 PyAV 時直接報錯
+    av = None
+
 
 # -------------------------------------------------------------------------
-# ffmpeg 檢查
+# PyAV 檢查
 # -------------------------------------------------------------------------
 
 @lru_cache(maxsize=1)
-def ensure_ffmpeg_available() -> None:
-    """確認 ffmpeg 可用；若不可用則直接拋錯。
-
-    需求：你希望「程式一開始」就檢查，因此本模組載入時就會執行一次。
-    """
-    ffmpeg_path = shutil.which("ffmpeg")
-    if ffmpeg_path is None:
+def ensure_pyav_available() -> None:
+    """確認 PyAV 可用；若未安裝，直接提示。"""
+    if av is None:
         raise RuntimeError(
-            "FFmpeg was not found in your PATH. "
-            "Please install FFmpeg and add it to PATH, then try again.\n"
-            "Installation:\n"
-            "- Windows: winget install Gyan.FFmpeg  (or: choco install ffmpeg)\n"
-            "- macOS : brew install ffmpeg\n"
-            "- Ubuntu : sudo apt-get update && sudo apt-get install -y ffmpeg"
+            "PyAV is required but not installed. "
+            "Please install PyAV (e.g., `uv pip install av`)."
         )
-
-    # 再做一次可執行性驗證（避免 PATH 有殘影或權限問題）
-    try:
-        subprocess.run(
-            ["ffmpeg", "-version"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception as e:
-        raise RuntimeError(
-            "FFmpeg was found, but running `ffmpeg -version` failed. "
-            "Please verify your FFmpeg installation, executable permissions, and PATH configuration."
-        ) from e
 
 
 # -------------------------------------------------------------------------
-# 媒體格式登錄表（Registry）
+# 媒體格式註冊表
 # -------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class MediaFormat:
-    """描述一種媒體類型（影片 / 音訊）"""
+    """描述一種媒體格式（影片 / 音訊）。"""
 
     kind: str  # "video" | "audio"
     extensions: Set[str]
@@ -72,7 +57,7 @@ MEDIA_REGISTRY: Dict[str, MediaFormat] = {
 }
 
 
-# 建立「副檔名 → 媒體類型」的快速查詢表（O(1)）
+# 建立副檔名 -> 媒體類型的快速查詢表（O(1)）
 EXTENSION_TO_KIND: Dict[str, str] = {
     ext: media.kind
     for media in MEDIA_REGISTRY.values()
@@ -81,55 +66,198 @@ EXTENSION_TO_KIND: Dict[str, str] = {
 
 
 def get_media_kind(ext: str) -> Optional[str]:
-    """依副檔名判斷媒體類型
-
-    參數：
-        ext: 副檔名（可包含或不包含 '.'）
-
-    回傳：
-        "video" | "audio" | None
-    """
+    """依副檔名判斷媒體類型。"""
     return EXTENSION_TO_KIND.get(ext.lower().lstrip("."))
 
 
-# -------------------------------------------------------------------------
-# 自訂例外
-# -------------------------------------------------------------------------
-
 class UnsupportedFormatError(Exception):
-    """不支援的媒體格式"""
+    """不支援的媒體格式。"""
 
 
 # -------------------------------------------------------------------------
-# 共用：執行 ffmpeg
+# 共用：PyAV 解碼/重取樣
 # -------------------------------------------------------------------------
 
-def _run_ffmpeg(cmd: list[str]) -> None:
-    """執行 ffmpeg 指令（統一錯誤訊息格式）。"""
-    # Windows：避免跳出 console 視窗（可選）
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+def _validate_audio_params(sample_rate: int, channels: int) -> None:
+    if sample_rate <= 0:
+        raise ValueError("sample_rate must be a positive integer.")
+    if channels not in {1, 2}:
+        raise ValueError("channels must be 1 or 2.")
+
+
+def _ensure_input_file(input_path: Path) -> None:
+    if not input_path.exists():
+        raise FileNotFoundError(input_path)
+
+    ext = input_path.suffix.lower().removeprefix(".")
+    if get_media_kind(ext) is None:
+        raise UnsupportedFormatError(f"Unsupported input format: .{ext}")
+
+
+def _ignore_invalid_frames(frames):
+    iterator = iter(frames)
+
+    while True:
+        try:
+            yield next(iterator)
+        except StopIteration:
+            break
+        except av.error.InvalidDataError:
+            continue
+
+
+def _group_frames(frames, num_samples=None):
+    fifo = av.audio.fifo.AudioFifo()
+
+    for frame in frames:
+        frame.pts = None  # 忽略 timestamp 檢查
+        fifo.write(frame)
+
+        if num_samples is not None and fifo.samples >= num_samples:
+            yield fifo.read()
+
+    if fifo.samples > 0:
+        yield fifo.read()
+
+
+def _resample_frames(frames, resampler):
+    for frame in itertools.chain(frames, [None]):
+        yield from resampler.resample(frame)
+
+
+def _iter_audio_frames(
+    input_path: Path,
+    *,
+    sample_rate: int,
+    channels: int,
+    sample_format: str,
+):
+    """以 PyAV 解碼並重取樣，產出 AudioFrame 迭代器。"""
+    ensure_pyav_available()
+    layout = "mono" if channels == 1 else "stereo"
+    resampler = av.audio.resampler.AudioResampler(
+        format=sample_format,
+        layout=layout,
+        rate=sample_rate,
+    )
+    try:
+        with av.open(str(input_path), mode="r", metadata_errors="ignore") as container:
+            if not container.streams.audio:
+                raise RuntimeError("Input has no audio stream.")
+
+            frames = container.decode(audio=0)
+            frames = _ignore_invalid_frames(frames)
+            frames = _group_frames(frames, 500000)
+            yield from _resample_frames(frames, resampler)
+    finally:
+        del resampler
+        gc.collect()
+
+
+def _decode_pcm_bytes(
+    input_path: Path,
+    *,
+    sample_rate: int,
+    channels: int,
+) -> bytes:
+    raw_buffer = io.BytesIO()
+    has_frames = False
+    for frame in _iter_audio_frames(
+        input_path,
+        sample_rate=sample_rate,
+        channels=channels,
+        sample_format="s16",
+    ):
+        has_frames = True
+        raw_buffer.write(frame.to_ndarray().tobytes())
+
+    if not has_frames:
+        raise RuntimeError("No audio frames were decoded.")
+
+    return raw_buffer.getvalue()
+
+
+def _parse_bitrate(bitrate: str) -> int:
+    text = (bitrate or "").strip().lower()
+    if not text:
+        return 0
+
+    scale = 1
+    if text.endswith("k"):
+        scale = 1000
+        text = text[:-1]
 
     try:
-        subprocess.run(
-            cmd,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=creationflags,
+        value = float(text) * scale
+    except ValueError:
+        return 0
+
+    return int(value) if value > 0 else 0
+
+
+def _write_wav_bytes(
+    output_target,
+    *,
+    pcm_bytes: bytes,
+    sample_rate: int,
+    channels: int,
+) -> None:
+    with wave.open(output_target, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(2)  # int16
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_bytes)
+
+
+def _encode_mp3(
+    input_path: Path,
+    output_target,
+    *,
+    sample_rate: int,
+    channels: int,
+    bitrate: str,
+) -> None:
+    ensure_pyav_available()
+    layout = "mono" if channels == 1 else "stereo"
+    with av.open(output_target, mode="w", format="mp3") as output:
+        stream = output.add_stream("mp3", rate=sample_rate)
+        stream.layout = layout
+
+        bit_rate = _parse_bitrate(bitrate)
+        if bit_rate:
+            stream.bit_rate = bit_rate
+
+        try:
+            stream.codec_context.format = "s16p"
+        except Exception:
+            pass
+
+        target_format = stream.codec_context.format
+        resampler = av.audio.resampler.AudioResampler(
+            format=target_format.name if target_format else "s16p",
+            layout=stream.layout.name if stream.layout else layout,
+            rate=sample_rate,
         )
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            "FFmpeg conversion failed. Error: " + (e.stderr or "<no stderr>")
-        ) from e
+        try:
+            with av.open(str(input_path), mode="r", metadata_errors="ignore") as container:
+                if not container.streams.audio:
+                    raise RuntimeError("Input has no audio stream.")
+
+                frames = container.decode(audio=0)
+                frames = _ignore_invalid_frames(frames)
+                frames = _group_frames(frames, 500000)
+                for frame in _resample_frames(frames, resampler):
+                    for packet in stream.encode(frame):
+                        output.mux(packet)
+                for packet in stream.encode(None):
+                    output.mux(packet)
+        finally:
+            del resampler
+            gc.collect()
 
 
 # -------------------------------------------------------------------------
-# 對外 API：輸出成檔案
+# 對外 API：輸出檔案
 # -------------------------------------------------------------------------
 
 def extract_audio(
@@ -140,71 +268,47 @@ def extract_audio(
     bitrate: str = "192k",
     channels: int = 2,
 ) -> Path:
-    """從影片或音訊檔中抽取音訊，並轉成指定格式（輸出成檔案）。
-
-    參數：
-        input_path    : 輸入檔案路徑
-        output_path   : 輸出檔案路徑（不含副檔名）
-        output_format : "mp3" 或 "wav"
-        sample_rate   : 取樣率（預設 48000）
-        bitrate       : mp3 位元率（僅 mp3 使用）
-        channels      : 聲道數（預設 2；若要接 Whisper 建議 1）
-
-    回傳：
-        最終輸出的音訊檔 Path
-    """
-    ensure_ffmpeg_available()
-
+    """從影片/音訊檔抽取音訊並轉檔成指定格式（輸出檔案）。"""
     input_path = Path(input_path)
     output_path = Path(output_path)
 
-    # 檢查輸入檔案是否存在
-    if not input_path.exists():
-        raise FileNotFoundError(input_path)
+    ensure_pyav_available()
+    _validate_audio_params(sample_rate, channels)
+    _ensure_input_file(input_path)
 
-    # 判斷輸入媒體類型
-    ext = input_path.suffix.lower().removeprefix(".")
-    media_kind = get_media_kind(ext)
-    if media_kind is None:
-        raise UnsupportedFormatError(f"Unsupported input format: .{ext}")
-
-    # 檢查輸出格式
+    output_format = output_format.lower()
     if output_format not in {"mp3", "wav"}:
         raise UnsupportedFormatError(f"Unsupported output format: {output_format}")
 
-    # 組合輸出檔案路徑
     output_file = output_path.with_suffix(f".{output_format}")
-
-    # 確保輸出資料夾存在
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    # ffmpeg 指令組合
-    cmd = [
-        "ffmpeg",
-        "-y",  # 覆寫輸出檔
-        "-loglevel",
-        "error",  # 減少噪音，只保留錯誤
-        "-i",
-        str(input_path),
-        "-vn",  # 忽略影像（只取音訊）
-        "-ar",
-        str(sample_rate),
-        "-ac",
-        str(channels),
-    ]
+    if output_format == "wav":
+        pcm_bytes = _decode_pcm_bytes(
+            input_path,
+            sample_rate=sample_rate,
+            channels=channels,
+        )
+        _write_wav_bytes(
+            str(output_file),
+            pcm_bytes=pcm_bytes,
+            sample_rate=sample_rate,
+            channels=channels,
+        )
+    else:
+        _encode_mp3(
+            input_path,
+            str(output_file),
+            sample_rate=sample_rate,
+            channels=channels,
+            bitrate=bitrate,
+        )
 
-    if output_format == "mp3":
-        # 建議使用 -b:a 指定位元率
-        cmd += ["-b:a", bitrate]
-
-    cmd.append(str(output_file))
-
-    _run_ffmpeg(cmd)
     return output_file
 
 
 # -------------------------------------------------------------------------
-# 對外 API：純記憶體（不落地檔案）
+# 對外 API：記憶體 bytes
 # -------------------------------------------------------------------------
 
 def extract_audio_bytes(
@@ -214,147 +318,79 @@ def extract_audio_bytes(
     channels: int = 1,
     bitrate: str = "192k",
 ) -> bytes:
-    """抽取音訊並以 bytes 回傳（不落地檔案）。
-
-    建議用途：
-    - 若你想自己處理音訊 bytes（例如傳給其他 API / 存 DB / 傳網路）
-
-    參數：
-        output_format: "wav" 或 "mp3"
-
-    回傳：
-        音訊 bytes
-    """
-    ensure_ffmpeg_available()
-
+    """抽取音訊並回傳 bytes（不落地檔案）。"""
     input_path = Path(input_path)
-    if not input_path.exists():
-        raise FileNotFoundError(input_path)
 
-    ext = input_path.suffix.lower().removeprefix(".")
-    if get_media_kind(ext) is None:
-        raise UnsupportedFormatError(f"Unsupported input format: .{ext}")
+    ensure_pyav_available()
+    _validate_audio_params(sample_rate, channels)
+    _ensure_input_file(input_path)
 
+    output_format = output_format.lower()
     if output_format not in {"wav", "mp3"}:
         raise UnsupportedFormatError(f"Unsupported output format: {output_format}")
 
-    # 透過 pipe:1 把輸出寫到 stdout
-    cmd: list[str] = [
-        "ffmpeg",
-        "-loglevel",
-        "error",
-        "-i",
-        str(input_path),
-        "-vn",
-        "-ar",
-        str(sample_rate),
-        "-ac",
-        str(channels),
-    ]
-
     if output_format == "wav":
-        cmd += ["-f", "wav", "pipe:1"]
-    else:
-        cmd += ["-f", "mp3", "-b:a", bitrate, "pipe:1"]
-
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-    try:
-        p = subprocess.run(
-            cmd,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            creationflags=creationflags,
+        pcm_bytes = _decode_pcm_bytes(
+            input_path,
+            sample_rate=sample_rate,
+            channels=channels,
         )
-        return p.stdout
-    except subprocess.CalledProcessError as e:
-        stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else "<no stderr>"
-        raise RuntimeError("FFmpeg failed to extract audio. Error: " + stderr) from e
+        buffer = io.BytesIO()
+        _write_wav_bytes(
+            buffer,
+            pcm_bytes=pcm_bytes,
+            sample_rate=sample_rate,
+            channels=channels,
+        )
+        return buffer.getvalue()
 
+    buffer = io.BytesIO()
+    _encode_mp3(
+        input_path,
+        buffer,
+        sample_rate=sample_rate,
+        channels=channels,
+        bitrate=bitrate,
+    )
+    return buffer.getvalue()
+
+
+# -------------------------------------------------------------------------
+# 對外 API：numpy float32 waveform
+# -------------------------------------------------------------------------
 
 def extract_audio_array(
     input_path: str | Path,
     sample_rate: int = 16000,
     channels: int = 1,
 ):
-    """抽取音訊並回傳為 numpy float32 waveform（不落地檔案）。
+    """抽取音訊並回傳 numpy float32 waveform（mono）。"""
+    ensure_pyav_available()
 
-    這個函式特別適合接 Whisper：
-    - Whisper 的 transcribe 可直接吃 1D float32 waveform（範圍約 -1 ~ 1）。
-
-    回傳：
-        np.ndarray (float32), shape=(n_samples,)
-    """
-    ensure_ffmpeg_available()
-
-    # 延遲載入：避免不需要 numpy 的人也被迫安裝
     try:
         import numpy as np
     except Exception as e:
         raise RuntimeError("使用 extract_audio_array 需要安裝 numpy。") from e
 
     input_path = Path(input_path)
-    if not input_path.exists():
-        raise FileNotFoundError(input_path)
+    _validate_audio_params(sample_rate, channels)
+    _ensure_input_file(input_path)
 
-    ext = input_path.suffix.lower().removeprefix(".")
-    if get_media_kind(ext) is None:
-        raise UnsupportedFormatError(f"Unsupported input format: .{ext}")
-
-    # 直接輸出 raw PCM（s16le）到 stdout，避免還要依賴 soundfile/pydub 解析 wav
-    cmd = [
-        "ffmpeg",
-        "-loglevel",
-        "error",
-        "-i",
-        str(input_path),
-        "-vn",
-        "-ar",
-        str(sample_rate),
-        "-ac",
-        str(channels),
-        "-f",
-        "s16le",
-        "pipe:1",
-    ]
-
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-    try:
-        p = subprocess.run(
-            cmd,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            creationflags=creationflags,
-        )
-    except subprocess.CalledProcessError as e:
-        stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else "<no stderr>"
-        raise RuntimeError("FFmpeg failed to extract audio. Error: " + stderr) from e
-
-    # bytes -> int16 -> float32 (-1 ~ 1)
-    audio_i16 = np.frombuffer(p.stdout, dtype=np.int16)
+    pcm_bytes = _decode_pcm_bytes(
+        input_path,
+        sample_rate=sample_rate,
+        channels=channels,
+    )
+    audio_i16 = np.frombuffer(pcm_bytes, dtype=np.int16)
     if audio_i16.size == 0:
-        raise RuntimeError("FFmpeg returned empty audio (the input may have no audio track or decoding failed).")
+        raise RuntimeError("PyAV returned empty audio (the input may have no audio track).")
 
     if channels > 1:
-        # (n_frames, channels) -> 取平均成 mono
-        audio_i16 = audio_i16.reshape(-1, channels).mean(axis=1).astype(np.int16)
+        frame_count = audio_i16.size // channels
+        audio_i16 = audio_i16[: frame_count * channels].reshape(-1, channels).mean(axis=1)
 
     audio_f32 = audio_i16.astype(np.float32) / 32768.0
     return audio_f32
-
-
-# -------------------------------------------------------------------------
-# 模組載入時就先檢查（符合「程式一開始就檢查」的需求）
-# -------------------------------------------------------------------------
-
-ensure_ffmpeg_available()
 
 
 # -------------------------------------------------------------------------
@@ -363,9 +399,8 @@ ensure_ffmpeg_available()
 
 if __name__ == "__main__":
     import sys
-    from pathlib import Path
 
-    from PySide6.QtCore import QObject, Qt, QUrl, Signal, Slot, QProcess
+    from PySide6.QtCore import QObject, Qt, QUrl, Signal, Slot
     from PySide6.QtGui import QDesktopServices
     from PySide6.QtWidgets import (
         QApplication,
@@ -396,7 +431,8 @@ if __name__ == "__main__":
         return input_path.with_suffix(f".{fmt}")
 
     class ConvertWorker(QObject):
-        """使用 QProcess 執行 ffmpeg，不會阻塞事件循環"""
+        """背景轉檔工作。"""
+
         finished = Signal(object)  # Path
         failed = Signal(str)
 
@@ -416,63 +452,21 @@ if __name__ == "__main__":
             self.sample_rate = sample_rate
             self.bitrate = bitrate
             self.channels = channels
-            self.process = None
 
         @Slot()
         def run(self) -> None:
-            """組裝 ffmpeg 指令並用 QProcess 執行"""
             try:
-                # 確保輸出目錄存在
-                self.output_file.parent.mkdir(parents=True, exist_ok=True)
-
-                # 組裝指令
-                cmd = [
-                    "ffmpeg",
-                    "-y",
-                    "-loglevel", "error",
-                    "-i", str(self.input_path),
-                    "-vn",
-                    "-ar", str(self.sample_rate),
-                    "-ac", str(self.channels),
-                ]
-
-                if self.output_format == "mp3":
-                    cmd += ["-b:a", self.bitrate]
-
-                cmd.append(str(self.output_file))
-
-                # 使用 QProcess
-                self.process = QProcess()
-                self.process.finished.connect(self._on_finished)
-                self.process.errorOccurred.connect(self._on_error)
-                
-                # 啟動 ffmpeg
-                self.process.start(cmd[0], cmd[1:])
-                
-            except Exception as e:
-                self.failed.emit(f"準備轉檔時發生錯誤：{e}")
-
-        @Slot(int, QProcess.ExitStatus)
-        def _on_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
-            """ffmpeg 執行完畢"""
-            if exit_code == 0 and exit_status == QProcess.ExitStatus.NormalExit:
+                extract_audio(
+                    input_path=self.input_path,
+                    output_path=self.output_file,
+                    output_format=self.output_format,
+                    sample_rate=self.sample_rate,
+                    bitrate=self.bitrate,
+                    channels=self.channels,
+                )
                 self.finished.emit(self.output_file)
-            else:
-                stderr = self.process.readAllStandardError().data().decode('utf-8', errors='replace')
-                self.failed.emit(f"ffmpeg 轉檔失敗 (exit code: {exit_code})\n{stderr}")
-            
-            self.process.deleteLater()
-            self.process = None
-
-        @Slot(QProcess.ProcessError)
-        def _on_error(self, error: QProcess.ProcessError) -> None:
-            """QProcess 發生錯誤"""
-            error_msg = f"QProcess 錯誤：{error}"
-            if self.process:
-                stderr = self.process.readAllStandardError().data().decode('utf-8', errors='replace')
-                if stderr:
-                    error_msg += f"\n{stderr}"
-            self.failed.emit(error_msg)
+            except Exception as e:
+                self.failed.emit(str(e))
 
     class ConvertDialog(QDialog):
         def __init__(self, input_path: Path, parent=None) -> None:
@@ -511,7 +505,7 @@ if __name__ == "__main__":
             out_row = QHBoxLayout()
             self.output_edit = QLineEdit()
             self.output_edit.setText(str(_default_output_file(input_path, "mp3")))
-            self.output_btn = QPushButton("Browse…")
+            self.output_btn = QPushButton("Browse")
             self.output_btn.setFocusPolicy(Qt.NoFocus)
             out_row.addWidget(self.output_edit, 1)
             out_row.addWidget(self.output_btn)
@@ -542,8 +536,7 @@ if __name__ == "__main__":
             self._output_customized = True
 
         def _sync_widgets_by_format(self, fmt: str) -> None:
-            is_mp3 = fmt == "mp3"
-            self.bitrate_combo.setEnabled(is_mp3)
+            self.bitrate_combo.setEnabled(fmt == "mp3")
 
         def _maybe_update_output_by_format(self, fmt: str) -> None:
             if self._output_customized:
@@ -554,7 +547,7 @@ if __name__ == "__main__":
             fmt = self.format_combo.currentText()
             suggested = self.output_edit.text().strip() or str(_default_output_file(self.input_path, fmt))
             file_filter = f"{fmt.upper()} (*.{fmt});;All files (*)"
-            out_path, _ = QFileDialog.getSaveFileName(self, "Save output as…", suggested, file_filter)
+            out_path, _ = QFileDialog.getSaveFileName(self, "Save output as", suggested, file_filter)
             if out_path:
                 self._output_customized = True
                 self.output_edit.setText(out_path)
@@ -591,13 +584,12 @@ if __name__ == "__main__":
 
             self.convert_btn.setEnabled(False)
 
-            progress = QProgressDialog("Converting…", "Cancel", 0, 0, self)
+            progress = QProgressDialog("Converting...", "Cancel", 0, 0, self)
             progress.setWindowTitle("Please wait")
             progress.setWindowModality(Qt.ApplicationModal)
-            progress.setCancelButton(None)  # 暫時不支援取消
+            progress.setCancelButton(None)  # 這裡不支援取消
             progress.show()
 
-            # 建立 Worker（不需要 QThread，QProcess 本身就是非阻塞的）
             self.worker = ConvertWorker(
                 input_path=self.input_path,
                 output_file=output_file,
@@ -625,7 +617,7 @@ if __name__ == "__main__":
 
             self.worker.finished.connect(_done)
             self.worker.failed.connect(_fail)
-            self.worker.run()
+            threading.Thread(target=self.worker.run, daemon=True).start()
 
     app = QApplication(sys.argv)
 

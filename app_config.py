@@ -10,7 +10,8 @@ CONFIG_FILE = BASE_DIR / "AppConfig.json"
 # 默認配置
 DEFAULT_CONFIG = {
     "theme": "light",  # "dark" or "light"
-    "model_name": "distil-large-v3",  # distil-large-v3, large-v3
+    "model_name": "large",  # tiny, base, small, medium, large, turbo
+    "custom_models": [],    # 自訂模型（下載後加入）
     "model_ttl_seconds": 180,  # 閒置多久後釋放模型 (秒)，-1 表示永不釋放
     "model_cache_in_ram": True,  # Auto Cache in RAM（CPU 閒置時保留）
     "language_hint": "",  # 語言提示 (留白=自動偵測)

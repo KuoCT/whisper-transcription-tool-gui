@@ -86,7 +86,7 @@ class MainWindow(QWidget):
 
         # 初始化模型管理器
         self.model_manager = ModelManager(
-            self.config.get("model_name", "distil-large-v3"),
+            self.config.get("model_name", "large"),
             self.config.get("model_ttl_seconds", 180),
             auto_cache_ram=self.config.get("model_cache_in_ram", True),
             device_preference=self.config.get("fw_device", "auto"),
@@ -265,7 +265,7 @@ class MainWindow(QWidget):
 
         # 更新模型管理器設定
         self.model_manager.update_config(
-            self.config.get("model_name", "distil-large-v3"),
+            self.config.get("model_name", "large"),
             self.config.get("model_ttl_seconds", 180),
             auto_cache_ram=self.config.get("model_cache_in_ram", True),
             device_preference=self.config.get("fw_device", "auto"),

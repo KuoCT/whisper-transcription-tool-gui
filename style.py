@@ -585,6 +585,22 @@ def build_settings_dialog_stylesheet(pal: dict[str, str]) -> str:
         radius=6,
         padding="8px 12px",
     )
+    download_button_qss = _qss_block(
+        "QPushButton#DownloadButton",
+        {
+            "padding": "6px 10px",
+            "min-width": "92px",
+            "font-size": "12px",
+        },
+    )
+    download_disabled_qss = _qss_block(
+        "QPushButton#DownloadButton:disabled",
+        {
+            "color": pal["hint"],
+            "background": pal["button_bg"],
+            "border-color": pal["border"],
+        },
+    )
     hover_qss = _qss_block(
         "QComboBox:hover, QLineEdit:hover, QPushButton:hover",
         {
@@ -620,6 +636,8 @@ def build_settings_dialog_stylesheet(pal: dict[str, str]) -> str:
         {label_base_qss}
         {input_base_qss}
         {button_base_qss}
+        {download_button_qss}
+        {download_disabled_qss}
 
         QLabel#pathLabel {{
             background: {pal["input_bg"]};

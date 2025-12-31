@@ -15,8 +15,8 @@ Built with **PySide6** and designed to be simple:
 - **Two modes**
   - **File mode**: drag & drop one or multiple files (queued and processed sequentially)
   - **Record mode**: record from your selected microphone and transcribe
-- **Whisper model**: `distil-large-v3 / large-v3` (multilingual)
-- **Language hint (optional)**: set a language code (e.g., `en`, `zh`) to skip auto-detection
+- **Whisper model**: `tiny / base / small / medium / large / turbo` (multilingual)
+- **Language hint (optional)**: set a language code or name (e.g., `en`, `english`, `zh`), comma-separated hints enable multilingual mode
 - **Output options (multi-select)**
   - Pop-up viewer (editable + copy)
   - Clipboard
@@ -33,11 +33,11 @@ Built with **PySide6** and designed to be simple:
 
 ## Requirements
 - **Python**: `>= 3.13`
-- **FFmpeg**: installed and available in your `PATH`
+- **PyAV (bundled FFmpeg)**: provided by faster-whisper (no system FFmpeg required)
 - **(Optional) NVIDIA GPU**: for faster transcription via CTranslate2 CUDA on Windows/Linux
 - **(Windows) CUDA DLLs**: app can download cuDNN/cuBLAS (CUDA 12) into `./cache/dll`
 
-> This app uses FFmpeg to decode and resample media into a Whisper-friendly waveform.
+> This app uses PyAV (bundled FFmpeg) to decode and resample media into a Whisper-friendly waveform.
 
 ## Installation (Recommended: uv)
 
@@ -62,4 +62,4 @@ macOS/Linux: `bash whisper-transcription-tool-gui.sh`
 ```bash
 uv run python gui.py
 ```
-On first run, faster-whisper will download model weights (cached in `./cache/whisper/`).
+On first run, faster-whisper may download model weights (cached in `./cache/whisper/`).

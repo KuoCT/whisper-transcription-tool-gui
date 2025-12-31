@@ -4,6 +4,7 @@ import sys
 import traceback
 from pathlib import Path
 from PySide6.QtCore import QObject, Signal
+from language_utils import format_language_label, parse_language_hint
 
 
 class TranscribeWorker(QObject):
@@ -52,7 +53,7 @@ class TranscribeWorker(QObject):
                 self.progress.emit("Extracting audio...")
 
                 # 不落地抽取：直接產生 float32 waveform
-                # 延遲載入：避免在 GUI 啟動時就因 ffmpeg/numpy 問題而失敗
+                # 延遲載入：避免在 GUI 啟動時就因 PyAV/numpy 問題而失敗
                 from audio_extract import extract_audio_array
 
                 audio = extract_audio_array(self.input_path, sample_rate=16000, channels=1)
@@ -60,13 +61,19 @@ class TranscribeWorker(QObject):
             self.progress.emit("Loading model & transcribing...")
             model = self.model_manager.acquire()
             try:
-                transcribe_kwargs = {
-                    "task": "transcribe",
-                }
-                if self.language_hint:
-                    transcribe_kwargs["language"] = self.language_hint
+                language_codes = parse_language_hint(self.language_hint)
+
+                transcribe_kwargs = {"task": "transcribe"}
+                if len(language_codes) == 1:
+                    transcribe_kwargs["language"] = language_codes[0]
                 if self.transcribe_options:
                     transcribe_kwargs.update(self.transcribe_options)
+                if len(language_codes) > 1 and "language_hints" not in transcribe_kwargs:
+                    # 多語提示：只在提示語言內挑選每段語言
+                    transcribe_kwargs["language_hints"] = language_codes
+                if len(language_codes) > 1 and "multilingual" not in transcribe_kwargs:
+                    transcribe_kwargs["multilingual"] = True
+                language_for_transcribe = (transcribe_kwargs.get("language") or "").strip()
 
                 # 避免不同 faster-whisper 版本的參數不一致
                 try:
@@ -79,7 +86,7 @@ class TranscribeWorker(QObject):
                 except Exception:
                     pass
 
-                segments_iter, _ = model.transcribe(
+                segments_iter, info = model.transcribe(
                     audio,
                     **transcribe_kwargs,
                 )
@@ -124,6 +131,9 @@ class TranscribeWorker(QObject):
                 sys.stdout.write("\n")
                 sys.stdout.flush()
 
+            if not language_for_transcribe:
+                _print_detected_language(info, language_codes)
+
             full_text = "".join(text_parts).strip()
 
             input_path_str = str(self.input_path) if self.input_path else ""
@@ -160,3 +170,23 @@ def _print_progress(percent: int, *, width: int = 24) -> None:
         sys.stdout.flush()
     except Exception:
         pass
+
+
+def _print_detected_language(info, hint_codes: list[str] | None = None) -> None:
+    """顯示偵測語言"""
+    try:
+        if info is None:
+            return
+        code = (getattr(info, "language", "") or "").strip()
+        label = format_language_label(code) or code or "unknown"
+        prob = getattr(info, "language_probability", None)
+        if prob is None:
+            sys.stdout.write(f"Detected language: {label}\n")
+        else:
+            sys.stdout.write(f"Detected language: {label} (p={prob:.2f})\n")
+        if hint_codes and len(hint_codes) > 1:
+            sys.stdout.write(f"Language hints: {', '.join(hint_codes)}\n")
+        sys.stdout.flush()
+    except Exception:
+        pass
+

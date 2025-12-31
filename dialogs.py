@@ -1,5 +1,7 @@
 from __future__ import annotations
-from PySide6.QtCore import Qt, Signal, QEvent
+import threading
+from pathlib import Path
+from PySide6.QtCore import QObject, Qt, Signal, QEvent
 from PySide6.QtGui import QIntValidator
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -10,6 +12,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QTextEdit,
     QVBoxLayout,
@@ -17,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from app_config import DEFAULT_CONFIG
+from language_utils import format_language_hint, is_auto_language_hint, parse_language_hint
 from style import (
     build_settings_dialog_stylesheet,
     build_transcript_popup_stylesheet,
@@ -24,9 +28,34 @@ from style import (
 )
 
 
-AVAILABLE_MODELS = ["distil-large-v3", "large-v3"]
+AVAILABLE_MODELS = ["tiny", "base", "small", "medium", "large", "turbo"]
 DEVICE_CHOICES = ["auto", "cuda", "cpu"]
 COMPUTE_CHOICES = ["auto", "float16", "int8_float16", "int8", "float32"]
+
+
+class ModelDownloadWorker(QObject):
+    """模型下載工作者（背景執行）。"""
+
+    finished = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, model_id: str, cache_dir: Path) -> None:
+        super().__init__()
+        self.model_id = (model_id or "").strip()
+        self.cache_dir = cache_dir
+
+    def run(self) -> None:
+        try:
+            from faster_whisper.utils import download_model
+
+            download_model(
+                self.model_id,
+                cache_dir=str(self.cache_dir),
+            )
+            self.finished.emit(self.model_id)
+        except Exception as exc:
+            message = str(exc).strip() or exc.__class__.__name__
+            self.failed.emit(message)
 
 
 class TranscriptPopupDialog(QDialog):
@@ -263,6 +292,9 @@ class SettingsDialog(QWidget):
     def __init__(self, config: dict, parent=None):
         super().__init__(parent)
         self.config = {**DEFAULT_CONFIG, **(config or {})}
+        self._model_cache_dir = Path(__file__).resolve().parent / "cache" / "whisper"
+        self._download_busy = False
+        self._custom_models: list[str] = []
         self.setWindowTitle("Settings")
 
         # 設置為獨立視窗（彈出對話框）
@@ -278,32 +310,9 @@ class SettingsDialog(QWidget):
 
     @staticmethod
     def _resolve_language_hint(user_input: str) -> str:
-        """解析語言輸入（支持 en / english），無效則回傳空字串表示自動偵測"""
-        raw = (user_input or "").strip()
-        if not raw:
-            return ""
-
-        norm = " ".join(raw.lower().replace("_", " ").replace("-", " ").split())
-
-        try:
-            # 本地 import：避免在沒有 faster-whisper 時造成啟動失敗
-            from faster_whisper.tokenizer import LANGUAGES
-        except Exception:
-            try:
-                from whisper.tokenizer import LANGUAGES
-            except Exception:
-                return ""
-
-        # 直接匹配代碼（例如 en / zh）
-        if norm in LANGUAGES:
-            return norm
-
-        # 匹配完整語言名稱（例如 english / chinese）
-        name_to_code = {
-            " ".join(v.lower().replace("_", " ").replace("-", " ").split()): k
-            for k, v in LANGUAGES.items()
-        }
-        return name_to_code.get(norm, "")
+        """匹配語言提示(e.g. en/english)"""
+        codes = parse_language_hint(user_input)
+        return format_language_hint(codes)
 
     def _build_ui(self) -> None:
         """構建 UI"""
@@ -326,10 +335,24 @@ class SettingsDialog(QWidget):
         model_row.setSpacing(12)
         model_label = QLabel("Model")
         model_label.setFixedWidth(140)
-        self.model_combo = self._create_combo(AVAILABLE_MODELS, self.config["model_name"])
+        current_model = (self.config.get("model_name") or "").strip()
+        custom_models = [m for m in (self.config.get("custom_models") or []) if m]
+        if current_model and current_model not in AVAILABLE_MODELS and current_model not in custom_models:
+            custom_models.append(current_model)
+        self._custom_models = custom_models
+        model_items = AVAILABLE_MODELS + [m for m in custom_models if m not in AVAILABLE_MODELS]
+        base_model = current_model if current_model in model_items else (model_items[0] if model_items else "")
+        self._current_model_name = current_model
+        self.model_combo = self._create_combo(model_items, base_model)
+        self.model_download_btn = QPushButton("Download")
+        self.model_download_btn.setObjectName("DownloadButton")
+        self.model_download_btn.clicked.connect(self._download_selected_model)
         model_row.addWidget(model_label)
         model_row.addWidget(self.model_combo)
+        model_row.addWidget(self.model_download_btn)
         layout.addLayout(model_row)
+        self.model_combo.currentTextChanged.connect(self._sync_model_download_state)
+        self._sync_model_download_state()
 
         # 語言提示
         lang_row = QHBoxLayout()
@@ -337,7 +360,7 @@ class SettingsDialog(QWidget):
         lang_label = QLabel("Language")
         lang_label.setFixedWidth(140)
         self.lang_input = QLineEdit()
-        self.lang_input.setPlaceholderText("auto-detect")
+        self.lang_input.setPlaceholderText("auto-detect (e.g. en, zh)")
         self.lang_input.setText(self.config.get("language_hint", "") or "")
         lang_row.addWidget(lang_label)
         lang_row.addWidget(self.lang_input)
@@ -438,6 +461,27 @@ class SettingsDialog(QWidget):
         adv_layout.setContentsMargins(0, 0, 0, 0)
         adv_layout.setSpacing(8)
         self.adv_container.setVisible(False)
+
+        # Custom Model
+        custom_row = QHBoxLayout()
+        custom_row.setSpacing(12)
+        custom_label = QLabel("Custom Model")
+        custom_label.setFixedWidth(140)
+        self.custom_model_input = QLineEdit()
+        self.custom_model_input.setPlaceholderText("Custom model (e.g. Systran/faster-whisper-large-v3)")
+        custom_value = ""
+        if self._current_model_name and self._current_model_name not in AVAILABLE_MODELS:
+            custom_value = self._current_model_name
+        self.custom_model_input.setText(custom_value)
+        self.custom_download_btn = QPushButton("Download")
+        self.custom_download_btn.setObjectName("DownloadButton")
+        self.custom_download_btn.clicked.connect(self._download_custom_model)
+        custom_row.addWidget(custom_label)
+        custom_row.addWidget(self.custom_model_input)
+        custom_row.addWidget(self.custom_download_btn)
+        adv_layout.addLayout(custom_row)
+        self.custom_model_input.textChanged.connect(self._sync_custom_download_state)
+        self._sync_custom_download_state()
 
         # Device
         device_row = QHBoxLayout()
@@ -604,6 +648,130 @@ class SettingsDialog(QWidget):
         layout.addLayout(button_layout)
         self.setLayout(layout)
 
+    def _resolve_download_model_id(self, model_id: str) -> str:
+        """整理模型 ID（去除空白）。"""
+        return (model_id or "").strip()
+
+    def _is_model_cached(self, model_id: str) -> bool:
+        """檢查模型是否已快取。"""
+        model_id = (model_id or "").strip()
+        if not model_id:
+            return False
+        if not self._model_cache_dir.exists():
+            return False
+        try:
+            from faster_whisper.utils import download_model
+
+            download_model(
+                model_id,
+                cache_dir=str(self._model_cache_dir),
+                local_files_only=True,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _add_custom_model(self, model_id: str) -> None:
+        """新增自訂模型到清單。"""
+        model_id = (model_id or "").strip()
+        if not model_id:
+            return
+        if model_id in AVAILABLE_MODELS or model_id in self._custom_models:
+            return
+        self._custom_models.append(model_id)
+        if hasattr(self, "model_combo"):
+            self.model_combo.addItem(model_id)
+
+    def _sync_model_download_state(self) -> None:
+        """同步預設模型下載按鈕狀態。"""
+        if not hasattr(self, "model_download_btn"):
+            return
+        if self._download_busy:
+            self.model_download_btn.setEnabled(False)
+            return
+        model_id = self.model_combo.currentText().strip()
+        cached = self._is_model_cached(model_id)
+        self.model_download_btn.setEnabled(bool(model_id) and not cached)
+
+    def _sync_custom_download_state(self) -> None:
+        """同步自訂模型下載按鈕狀態。"""
+        if not hasattr(self, "custom_download_btn") or not hasattr(self, "custom_model_input"):
+            return
+        if self._download_busy:
+            self.custom_download_btn.setEnabled(False)
+            return
+        model_id = (self.custom_model_input.text() or "").strip()
+        cached = self._is_model_cached(model_id)
+        if cached:
+            self._add_custom_model(model_id)
+        self.custom_download_btn.setEnabled(bool(model_id) and not cached)
+
+    def _start_model_download(self, model_id: str, *, is_custom: bool) -> None:
+        """啟動模型下載流程。"""
+        model_id = self._resolve_download_model_id(model_id)
+        if not model_id:
+            return
+        if self._download_busy:
+            return
+
+        if self._is_model_cached(model_id):
+            self._sync_model_download_state()
+            self._sync_custom_download_state()
+            return
+
+        self._download_busy = True
+        self._sync_model_download_state()
+        self._sync_custom_download_state()
+
+        progress = QProgressDialog(f"Downloading model: {model_id}", "", 0, 0, self)
+        progress.setWindowTitle("Please wait")
+        progress.setWindowModality(Qt.ApplicationModal)
+        progress.setCancelButton(None)
+        progress.show()
+
+        self._download_worker = ModelDownloadWorker(model_id, self._model_cache_dir)
+
+        def _done(model_name: str) -> None:
+            progress.close()
+            self._download_busy = False
+            if is_custom:
+                self._add_custom_model(model_name)
+                QMessageBox.information(
+                    self,
+                    "Download",
+                    "Custom model downloaded. Select it from the Model list to use it.",
+                )
+            else:
+                QMessageBox.information(self, "Download", "Model downloaded successfully.")
+            self._sync_model_download_state()
+            self._sync_custom_download_state()
+
+        def _fail(msg: str) -> None:
+            progress.close()
+            self._download_busy = False
+            self._sync_model_download_state()
+            self._sync_custom_download_state()
+            QMessageBox.critical(self, "Download failed", msg)
+
+        self._download_worker.finished.connect(_done)
+        self._download_worker.failed.connect(_fail)
+        threading.Thread(target=self._download_worker.run, daemon=True).start()
+
+    def _download_selected_model(self) -> None:
+        """下載目前選擇的模型。"""
+        model_id = self.model_combo.currentText().strip()
+        if not model_id:
+            return
+        self._start_model_download(model_id, is_custom=False)
+
+    def _download_custom_model(self) -> None:
+        """下載自訂模型。"""
+        model_id = (self.custom_model_input.text() or "").strip()
+        if not model_id:
+            QMessageBox.warning(self, "Custom Model", "Please enter a model ID first.")
+            return
+        self._start_model_download(model_id, is_custom=True)
+
     def _toggle_advanced(self, checked: bool) -> None:
         """展開/收合進階設定區塊。"""
         checked = bool(checked)
@@ -629,12 +797,15 @@ class SettingsDialog(QWidget):
     def _save_settings(self) -> None:
         """保存設定"""
         self.config["theme"] = self.theme_combo.currentText()
-        self.config["model_name"] = self.model_combo.currentText()
+        model_name = self.model_combo.currentText().strip()
+        self.config["model_name"] = model_name
+
+        self.config["custom_models"] = list(self._custom_models)
 
         # 語言提示：空白=自動偵測；指定語言可略過前 30 秒語言偵測
         raw_lang = (self.lang_input.text() or "").strip() if hasattr(self, "lang_input") else ""
         resolved_lang = self._resolve_language_hint(raw_lang)
-        if raw_lang and not resolved_lang:
+        if raw_lang and not resolved_lang and not is_auto_language_hint(raw_lang):
             QMessageBox.warning(
                 self,
                 "Language",

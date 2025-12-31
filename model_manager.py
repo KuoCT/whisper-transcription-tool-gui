@@ -6,21 +6,21 @@ from pathlib import Path
 from cuda_utils import (
     cuda_runtime_available,
     get_cuda_dll_dir,
-    get_max_vram_gb,
     has_nvidia_gpu,
     prepare_cuda_dlls,
 )
 
 
-# 估算模型最低 VRAM 需求（GB），供自動裝置選擇使用
-MODEL_VRAM_REQUIREMENTS_GB = {
-    "distil-large-v3": 5.0,
-    "large-v3": 10.0,
-}
-
 MODEL_REPO_IDS = {
+    "tiny": "Systran/faster-whisper-tiny",
+    "base": "Systran/faster-whisper-base",
+    "small": "Systran/faster-whisper-small",
+    "medium": "Systran/faster-whisper-medium",
     "distil-large-v3": "Systran/faster-distil-whisper-large-v3",
     "large-v3": "Systran/faster-whisper-large-v3",
+    "large": "Systran/faster-whisper-large-v3",
+    "large-v3-turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+    "turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
 }
 
 
@@ -166,7 +166,7 @@ class ModelManager:
                 resume_download=True,
             )
         except Exception:
-            # 下載失敗時交給 WhisperModel 自行處理（可能已部分下載）
+            # 下載失敗交給 WhisperModel 自行處理
             pass
 
     def _can_use_cuda_for_model(self) -> bool:
@@ -176,21 +176,32 @@ class ModelManager:
         if not cuda_runtime_available(dll_dir):
             return False
 
-        required = MODEL_VRAM_REQUIREMENTS_GB.get(self._model_name, 0.0)
-        if required <= 0:
-            return True
-
-        vram_gb = get_max_vram_gb()
-        if vram_gb <= 0:
-            return True
-        return vram_gb >= required
+        return True
 
     def _free_model(self, model) -> None:
-        """釋放模型資源。"""
+        """釋放模型記憶體。"""
         try:
             del model
         finally:
             gc.collect()
+
+    def _load_model_for_device(self, device: str):
+        compute_type = self._resolve_compute_type(device)
+        if device == "cuda":
+            prepare_cuda_dlls(get_cuda_dll_dir())
+
+        self._maybe_download_model()
+
+        from whisper_hinted import HintedWhisperModel  # 延遲 import，避免啟動時載入過慢
+
+        return HintedWhisperModel(
+            self._model_name,
+            device=device,
+            compute_type=compute_type,
+            cpu_threads=self._cpu_threads,
+            num_workers=self._num_workers,
+            download_root=str(self._download_root),
+        )
 
     def acquire(self):
         """取得模型（如需要會延遲載入）。"""
@@ -211,21 +222,16 @@ class ModelManager:
         if need_load:
             try:
                 device = self._resolve_device()
-                compute_type = self._resolve_compute_type(device)
-                prepare_cuda_dlls(get_cuda_dll_dir())
+                try:
+                    model = self._load_model_for_device(device)
+                except Exception as exc:
+                    if self._device_preference == "auto" and device == "cuda":
+                        print(f"CUDA load failed ({exc}); falling back to CPU.")
+                        device = "cpu"
+                        model = self._load_model_for_device(device)
+                    else:
+                        raise
 
-                self._maybe_download_model()
-
-                from faster_whisper import WhisperModel  # 延遲 import，避免啟動時卡頓
-
-                model = WhisperModel(
-                    self._model_name,
-                    device=device,
-                    compute_type=compute_type,
-                    cpu_threads=self._cpu_threads,
-                    num_workers=self._num_workers,
-                    download_root=str(self._download_root),
-                )
             except Exception:
                 with self._lock:
                     self._loading = False
