@@ -251,8 +251,8 @@ class ModelManager:
         if device == "cuda":
             prepare_cuda_dlls(get_cuda_dll_dir())
 
-        self._maybe_download_model()
-        # ??????????????
+        self._maybe_download_model() # 確保模型已下載
+        # 在載入模型前啟動預載入進度指示器
         progress_stop, progress_thread = _start_preload_progress("Preloading model")
         try:
             from faster_whisper import WhisperModel

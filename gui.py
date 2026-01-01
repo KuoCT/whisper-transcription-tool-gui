@@ -602,8 +602,8 @@ class MainWindow(QWidget):
         box.setWindowTitle("CUDA")
         box.setIcon(QMessageBox.Question)
         box.setText(
-            "NVIDIA GPU detected, but CUDA DLLs are missing.\n"
-            "Download CUDA 12 DLLs now?"
+            "You need DLLs to enable CUDA (GPU) acceleration.\n"
+            "Download now?"
         )
         box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
 
@@ -797,6 +797,7 @@ class MainWindow(QWidget):
         except Exception:
             options["batch_size"] = 8
         options["vad_filter"] = bool(self.config.get("fw_vad_filter", False))
+        options["multilingual"] = bool(self.config.get("fw_multilingual", False))
         return options
 
     # -------------------------------------------------------------------------

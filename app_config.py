@@ -10,7 +10,7 @@ CONFIG_FILE = BASE_DIR / "AppConfig.json"
 # 默認配置
 DEFAULT_CONFIG = {
     "theme": "light",  # "dark" or "light"
-    "model_name": "large",  # tiny, base, small, medium, large, turbo
+    "model_name": "medium",  # tiny, base, small, medium, large, turbo
     "custom_models": [],    # 自訂模型（下載後加入）
     "model_ttl_seconds": 180,  # 閒置多久後釋放模型 (秒)，-1 表示永不釋放
     "model_cache_in_ram": True,  # Auto Cache in RAM（CPU 閒置時保留）
@@ -26,6 +26,7 @@ DEFAULT_CONFIG = {
     "fw_batch_size": 8,
     "fw_beam_size": 5,
     "fw_vad_filter": False,
+    "fw_multilingual": False,
     "cuda_check_enabled": True,
 
     "output_dir": str(BASE_DIR / "output"),

@@ -62,17 +62,19 @@ class TranscribeWorker(QObject):
             model = self.model_manager.acquire()
             try:
                 language_codes = parse_language_hint(self.language_hint)
+                language_hint = language_codes[0] if language_codes else ""
 
                 transcribe_kwargs = {"task": "transcribe"}
-                if len(language_codes) == 1:
-                    transcribe_kwargs["language"] = language_codes[0]
                 if self.transcribe_options:
                     transcribe_kwargs.update(self.transcribe_options)
-                if len(language_codes) > 1 and "language_hints" not in transcribe_kwargs:
-                    # 多語提示：只在提示語言內挑選每段語言
-                    transcribe_kwargs["language_hints"] = language_codes
-                if len(language_codes) > 1 and "multilingual" not in transcribe_kwargs:
+
+                multilingual = bool(transcribe_kwargs.get("multilingual", False))
+                if multilingual:
                     transcribe_kwargs["multilingual"] = True
+                    transcribe_kwargs.pop("language", None)
+                elif language_hint:
+                    transcribe_kwargs["language"] = language_hint
+
                 language_for_transcribe = (transcribe_kwargs.get("language") or "").strip()
 
                 # 避免不同 faster-whisper 版本的參數不一致

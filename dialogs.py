@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from app_config import DEFAULT_CONFIG
-from language_utils import format_language_hint, is_auto_language_hint, parse_language_hint
+from language_utils import is_auto_language_hint, parse_language_hint
 from style import (
     build_settings_dialog_stylesheet,
     build_transcript_popup_stylesheet,
@@ -308,10 +308,12 @@ class SettingsDialog(QWidget):
         self.adjustSize()
 
     @staticmethod
-    def _resolve_language_hint(user_input: str) -> str:
+    def _resolve_language_hint(user_input: str) -> tuple[str, bool]:
         """匹配語言提示(e.g. en/english)"""
         codes = parse_language_hint(user_input)
-        return format_language_hint(codes)
+        if not codes:
+            return "", False
+        return codes[0], len(codes) > 1
 
     def _filter_cached_custom_models(self, model_ids: list[str]) -> list[str]:
         """開啟設定時同步清理已被刪除的自訂模型。"""
@@ -368,10 +370,17 @@ class SettingsDialog(QWidget):
         lang_label = QLabel("Language")
         lang_label.setFixedWidth(140)
         self.lang_input = QLineEdit()
-        self.lang_input.setPlaceholderText("auto-detect (e.g. en, zh)")
+        self.lang_input.setPlaceholderText("auto-detect (e.g. en or zh)")
         self.lang_input.setText(self.config.get("language_hint", "") or "")
+        self.ck_multilingual = QCheckBox("Multilingual")
+        self.ck_multilingual.setChecked(bool(self.config.get("fw_multilingual", False)))
+        self.ck_multilingual.setToolTip(
+            "When multilingual mode is enabled, each segment's language is auto-detected, "
+            "and the language hint is ignored."
+        )
         lang_row.addWidget(lang_label)
         lang_row.addWidget(self.lang_input)
+        lang_row.addWidget(self.ck_multilingual)
         layout.addLayout(lang_row)
 
         # 麥克風（輸入裝置）
@@ -840,7 +849,7 @@ class SettingsDialog(QWidget):
 
         # 語言提示：空白=自動偵測；指定語言可略過前 30 秒語言偵測
         raw_lang = (self.lang_input.text() or "").strip() if hasattr(self, "lang_input") else ""
-        resolved_lang = self._resolve_language_hint(raw_lang)
+        resolved_lang, has_multiple = self._resolve_language_hint(raw_lang)
         if raw_lang and not resolved_lang and not is_auto_language_hint(raw_lang):
             QMessageBox.warning(
                 self,
@@ -849,7 +858,16 @@ class SettingsDialog(QWidget):
             )
             if hasattr(self, "lang_input"):
                 self.lang_input.setText("")
+        elif has_multiple:
+            QMessageBox.warning(
+                self,
+                "Language",
+                "Only one language code is supported. Using the first one.",
+            )
+            if hasattr(self, "lang_input"):
+                self.lang_input.setText(resolved_lang)
         self.config["language_hint"] = resolved_lang
+        self.config["fw_multilingual"] = bool(self.ck_multilingual.isChecked())
 
         # 麥克風輸入裝置（-1 = System Default）
         if hasattr(self, "mic_combo"):

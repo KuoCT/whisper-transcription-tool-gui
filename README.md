@@ -3,7 +3,7 @@
 ![fig_2](./asset/demo2-1.png)
 ![fig_3](./asset/demo3-1.png)
 
-A desktop GUI for transcribing **audio/video files** and **microphone recordings** using [**faster-whisper**](https://github.com/SYSTRAN/faster-whisper) (local inference).
+A desktop GUI for transcribing **audio/video files** and **microphone recordings** using [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) (local inference).
 
 Built with **PySide6** and designed to be simple:
 - Drag & drop media files to transcribe
@@ -16,7 +16,7 @@ Built with **PySide6** and designed to be simple:
   - **File mode**: drag & drop one or multiple files (queued and processed sequentially)
   - **Record mode**: record from your selected microphone and transcribe
 - **Whisper model**: `tiny / base / small / medium / large / turbo` (multilingual)
-- **Language hint (optional)**: set a language code or name (e.g., `en`, `english`, `zh`), comma-separated hints enable multilingual mode
+- **Language hint (optional)**: set a language code or name (e.g., `en`, `english`, `zh`...)
 - **Output options (multi-select)**
   - Pop-up viewer (editable + copy)
   - Clipboard
@@ -35,31 +35,51 @@ Built with **PySide6** and designed to be simple:
 - **Python**: `>= 3.13`
 - **PyAV (bundled FFmpeg)**: provided by faster-whisper (no system FFmpeg required)
 - **(Optional) NVIDIA GPU**: for faster transcription via CTranslate2 CUDA on Windows/Linux
-- **(Windows) CUDA DLLs**: app can download cuDNN/cuBLAS (CUDA 12) into `./cache/dll`
 
-> This app uses PyAV (bundled FFmpeg) to decode and resample media into a Whisper-friendly waveform.
+> If an NVIDIA GPU is detected, the program will ask whether to download and cache CUDA DLLs in `./cache/dll`. Users do not need to pre-install the CUDA Toolkit.
 
-## Installation (Recommended: uv)
+> model weights will also cached in `./cache/whisper/`.
 
-This project is managed with **uv**:
-- Fast dependency resolution
-- Reproducible installs via `pyproject.toml`
+## Installation & Usage
 
-### 1. Install uv
-See the official instructions: https://astral.sh/uv/
+This project is managed with [`uv`](https://astral.sh/uv/) 
 
-### 2. Install dependencies
-Clone this repository, then run in the repository root:
+### Automation script
+
+You can use the provided script to install everything, sync dependencies, check for updates, and launch the GUI in one step:
+
+- **Windows**:  
+  Run `whisper-transcription-tool-gui.bat`
+
+- **macOS / Linux**:  
+  Run `bash whisper-transcription-tool-gui.sh`
+
+The script will:
+- Install [`uv`](https://astral.sh/uv/) (if not already installed)
+- Sync dependencies via `pyproject.toml`
+- Pull the latest changes from the repository
+- Launch the transcription GUI
+
+---
+
+### Manual setup (alternative)
+
+If you prefer to do everything manually:
+
+#### 1. Install `uv`
+Follow the instructions on the official site:  
+https://astral.sh/uv/
+
+#### 2. Sync project dependencies
+In the root of this repository:
 
 ```bash
 uv sync
 ```
+#### 3. Run the GUI
 
-## Usage
-Windows: `whisper-transcription-tool-gui.bat`  
-macOS/Linux: `bash whisper-transcription-tool-gui.sh`
+Use uv run to start the application:
 
 ```bash
 uv run python gui.py
 ```
-On first run, faster-whisper may download model weights (cached in `./cache/whisper/`).
