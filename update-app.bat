@@ -3,6 +3,7 @@ setlocal
 cd /d "%~dp0"
 
 call install-uv.bat
+if %errorlevel% neq 0 exit /b %errorlevel%
 
 where git >nul 2>&1
 if %errorlevel% neq 0 (
