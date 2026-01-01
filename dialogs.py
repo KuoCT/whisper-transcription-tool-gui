@@ -818,6 +818,8 @@ class SettingsDialog(QWidget):
         model_hint = self.model_download_btn.sizeHint()
         custom_hint = self.custom_download_btn.sizeHint()
         target_w = max(model_hint.width(), custom_hint.width())
+        if hasattr(self, "ck_multilingual"):
+            target_w = max(target_w, self.ck_multilingual.sizeHint().width())
         target_h = max(model_hint.height(), custom_hint.height())
         if target_w <= 0:
             target_w = 92
@@ -825,6 +827,8 @@ class SettingsDialog(QWidget):
             target_h = 28
         self.model_download_btn.setFixedSize(target_w, target_h)
         self.custom_download_btn.setFixedSize(target_w, target_h)
+        if hasattr(self, "ck_multilingual"):
+            self.ck_multilingual.setFixedWidth(target_w)
 
     def _create_combo(self, items, current):
         """創建下拉選單"""

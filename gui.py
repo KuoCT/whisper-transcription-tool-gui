@@ -766,17 +766,28 @@ class MainWindow(QWidget):
         base_dir = Path(__file__).resolve().parent
         if sys.platform == "win32":
             script = base_dir / "update-app.bat"
-            cmd = ["cmd", "/c", str(script)]
+            cmd = ["cmd", "/c", str(script), "--relaunch"]
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, "DETACHED_PROCESS", 0)
+            popen_kwargs = {"creationflags": creationflags}
         else:
             script = base_dir / "update-app.sh"
-            cmd = ["bash", str(script)]
+            cmd = ["bash", str(script), "--relaunch"]
+            popen_kwargs = {"start_new_session": True}
 
         if not script.exists():
             QMessageBox.warning(self, "Update", f"Update script not found: {script}")
             return False
 
         try:
-            subprocess.Popen(cmd, cwd=str(base_dir))
+            with open(os.devnull, "wb") as devnull:
+                subprocess.Popen(
+                    cmd,
+                    cwd=str(base_dir),
+                    stdin=devnull,
+                    stdout=devnull,
+                    stderr=devnull,
+                    **popen_kwargs,
+                )
             return True
         except Exception as exc:
             QMessageBox.warning(self, "Update", f"Failed to launch update script.\n{exc}")
